@@ -1,0 +1,2 @@
+压缩的是程序，db是实时库，。sql是mysql的建库文件
+数据源是QPlantAgcRtdb和QPlantAgcHisdb
