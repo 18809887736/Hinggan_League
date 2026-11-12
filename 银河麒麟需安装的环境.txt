@@ -1,0 +1,8 @@
+mysql
+mysqlodbc
+sqlite
+sqliteodbc
+qt4
+sqlitebrowser
+sqliteman
+tcpdump
