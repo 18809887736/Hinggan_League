@@ -1,23 +1,44 @@
-# 兴安盟 AGC —— PLC 通道点表整理
+# 兴安盟 AGC —— 通道信息与 PLC 点表整理
 
 > 来源：`main.sql`（qplantagcrtdb 实时库 Navicat 导出，SQLite）
 > 整理日期：2026-11-12
-> 通道：`chunnel_num = 4`，名称 **PLC**
+> 通道全量：共 4 条 —— 0「NCS转发104主」/ 1「NCS采集104」/ 4「PLC」/ 5「NCS转发104备」（见 §1）；点表详表为通道 4（PLC）
 
-## 1. 通道定义（chunnel 表）
+## 1. 全部通道总览（chunnel 表 + PORT_NET 表）
+
+| 通道号 | 名称 | 用途 chunnel_type | 协议 protocol_type | 端口方式 port_type | 网络配置（PORT_NET） | rtu_addr | 遥测格式 iYcFunctionCode | 通道故障遥信 relate_yx_num | 保存原码 IsSaveOriCode |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | NCS转发104主 | 2 转发 TRANSMIT | 4 = 104 | 4 = NET_ACCEPT 服务端 | 本地 0.0.0.0:**2404** 监听，对端不限（0.0.0.0:0） | 257 | 13 浮点型 | 101 NCS转发104通信状态 | 0 |
+| 1 | NCS采集104 | 1 采集 GETHER | 4 = 104 | 3 = NET_CONNECT 客户端 | 对端① 10.0.0.88:2404；对端② 196.5.1.216:2404（两条记录） | 257 | 13 浮点型 | 102 NCS采集104通信状态 | NULL |
+| 4 | PLC | 1 采集 GETHER | 13 = MODBUSTCP | 3 = NET_CONNECT 客户端 | 对端 **192.192.192.31:502** | 0 | NULL | 107 DCS采集通信状态 | 1 |
+| 5 | NCS转发104备 | 2 转发 TRANSMIT | 4 = 104 | 4 = NET_ACCEPT 服务端 | 本地 0.0.0.0:**2404** 监听；记录对端 222.111.112.216、196.5.1.216（端口 0） | 257 | 13 浮点型 | 108 NCS转发104备通道状态 | NULL |
+
+枚举字典（库内字典表 CHUNNEL_TYPE / CHUNNEL_PROTOCOL_TYPE / PORT_TYPE / CHUNNEL_YcFunctionCode）：
+
+- chunnel_type：1 = GETHER（采集）、2 = TRANSMIT（转发）
+- protocol_type（常用项）：4 = 104、13 = MODBUSTCP（完整表另有 CDT/101/MODBUS/103 等）
+- port_type：3 = NET_CONNECT（主动外连）、4 = NET_ACCEPT（监听接入）
+- iYcFunctionCode：0 = 无、9 = 整型、13 = 浮点型
+
+### 1.1 通道关系解读
+
+- **转发主/备（0 / 5）**：均为 104 服务端、本地同样配 2404 端口——主备冗余、互斥启用（同一时刻只有一个在监听，推断）；上级主站作为客户端接入取数/下发。备通道（5）的 PORT_NET 记录了两个对端地址（端口 0），疑似允许接入的对端白名单（待确认）。
+- **采集 104（1）**：AVC 作 104 客户端，配两个对端 10.0.0.88 / 196.5.1.216（均 2404），主备对端或 A/B 双网；196.5.1.216 同时出现在通道 5 的记录中，应为同一 NCS 主机的另一网卡。
+- **PLC 采集（4）**：MODBUSTCP 客户端，对端 192.192.192.31:**502**（Modbus TCP 标准端口）。✅ 原疑点 3 已解决：IP/端口就在实时库 `PORT_NET` 表中（此前只查了 port_serial，误判不在库）。
+- 通道 4 故障遥信 107 在 YX_DATA 中名称为「DCS采集通信状态」——PLC 接口即 DCS 侧通道。
+- 三条 104 通道 rtu_addr 均为 257（0x101），PLC 通道为 0。
+
+### 1.2 PLC 通道 Modbus 模块参数（CHUNNEL_MODULE_MODBUS，全库仅通道 4 一条）
 
 | 字段 | 值 | 含义 |
 |---|---|---|
-| chunnel_num | 4 | 通道号 |
-| chunnel_type | 1 | 采集（GETHER） |
-| protocol_type | 13 | **MODBUSTCP** |
-| port_type | 3 | 网络 |
-| chunnel_name / nick_name | PLC / PLC | |
-| relate_yx_num | 107 | 通道故障遥信号 |
-| rtu_addr | 0 | |
-| IsSaveOriCode | 1 | 保存原始码值 |
-
-注意：MODBUSTCP 的服务端 IP / 端口**不在实时库**（port_serial 表无记录，网络通道不用串口参数），应在程序侧配置（VeStore.ini 或程序配置文件）确认。
+| ModuleAddress | 1 | Modbus 从站地址 = 1 |
+| ModuleName | PLC | |
+| HaveYC / YCFunctionCode | 1 / 4 | 遥测 04 功能码（读输入寄存器）；YCDataType=3、起始 0、上送周期 100 |
+| HaveYX / YXFunctionCode | 1 / 2 | 遥信 02 功能码（读离散量）；YXDataType=1、YXDataOrder=1、起始 0、上送周期 100 |
+| YKFunctionCode | 5 | 遥控 05（写线圈） |
+| YTFunctionCode | 6 | 遥设 06（写单寄存器） |
+| PortType | 2 | ⚠ 若按 PORT_TYPE 字典是 NET_UDP，与 MODBUSTCP 不符，疑似另一套枚举（见 §6 疑点 4） |
 
 ## 2. 点表总览
 
@@ -85,4 +106,5 @@
 
 1. ~~遥测 path11 → 308~~ **已修正（2026-11-12）**：path11 现为 **305 = #3机组有功功率指令反馈**，指令反馈系列 301/303/305/307 齐整；308 仍为 yc_data 中"#4机组实发有功功率"定义（不在通道内，正常）。
 2. **遥信 path22 → yx 603 在 YX_DATA 中无定义**（按规律应为"#3机组RB状态"），运行时该点无名称。
-3. 协议 13 = MODBUSTCP 的服务端地址/端口待与程序配置核对。
+3. ~~协议 13 = MODBUSTCP 的服务端地址/端口待与程序配置核对。~~ **已解决（2026-11-12）**：`PORT_NET` 表有通道 4 记录——对端 **192.192.192.31:502**（此前只查 port_serial 误判不在库）。
+4. **CHUNNEL_MODULE_MODBUS.PortType = 2**：按 PORT_TYPE 字典为 NET_UDP，与 MODBUSTCP 通道矛盾，疑似该表另用一套枚举，待与程序核对。
