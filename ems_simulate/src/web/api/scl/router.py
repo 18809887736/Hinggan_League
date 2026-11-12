@@ -1,0 +1,661 @@
+"""SCL 文件管理 - Web API
+
+CRUD + 上传/浏览/导入/校验 端点。
+
+端点列表:
+  POST   /scl/upload          — 上传 SCL 文件
+  GET    /scl/list            — 列出所有 SCL 文件
+  GET    /scl/detail          — 获取文件详情
+  DELETE /scl/delete          — 删除 SCL 文件
+  POST   /scl/preview         — 预览 (解析+转换，不持久化)
+  POST   /scl/validate        — 校验 SCL 文件
+  POST   /scl/parse           — 解析 SCL 文件 (返回结构化模型)
+  POST   /scl/import-points   — 从 SCL 文件导入测点到数据库
+  POST   /scl/import-goose    — 从 SCL 文件导入 GOOSE 配置
+  POST   /scl/import-full     — 完整导入 (测点 + GOOSE + Report)
+  GET    /scl/browse-tree     — 浏览 SCL 文件结构树
+  POST   /scl/diff            — 对比两个 SCL 文件
+  GET    /scl/ied-list        — 获取 SCL 文件中的 IED 列表
+"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+
+from fastapi import APIRouter, File, Form, Query, Request, UploadFile
+from fastapi.responses import PlainTextResponse
+
+from src.config.storage import get_storage_path
+from src.web.api.channel.protocol_guards import require_iec61850_channel
+from src.web.api.exceptions import NotFoundError, ValidationError
+from src.web.api.schemas import BaseResponse
+from src.web.log import log
+
+router = APIRouter(prefix="/api/scl", tags=["SCL 文件管理"])
+
+
+# ===== 解析结果缓存: 避免每次请求都重新解析文件 =====
+# key = (file_path, last_mtime) → SclImportResult
+_parse_cache: dict[tuple[str, float, int], dict] = {}
+_CACHE_TTL = 3600  # 缓存有效期 1 小时
+
+
+def _get_cached_result(request: Request, file_path: str) -> dict | None:
+    """获取缓存中的解析结果，文件未变更时返回缓存"""
+    try:
+        stat = os.stat(file_path)
+        mtime = stat.st_mtime
+        size = stat.st_size
+        key = (file_path, mtime, size)
+        cached = _parse_cache.get(key)
+        if cached:
+            return cached
+    except OSError:
+        return None
+
+
+def _set_cached_result(request: Request, file_path: str, result: dict):
+    """缓存解析结果"""
+    try:
+        stat = os.stat(file_path)
+        key = (file_path, stat.st_mtime, stat.st_size)
+        _parse_cache[key] = result
+        # 只保留最近 20 个
+        if len(_parse_cache) > 20:
+            for k in list(_parse_cache.keys())[:-20]:
+                _parse_cache.pop(k, None)
+    except OSError:
+        pass
+
+
+def _invalidate_cache_for(file_path: str):
+    """清除指定文件路径的缓存"""
+    keys_to_delete = [k for k in _parse_cache if k[0] == file_path]
+    for k in keys_to_delete:
+        _parse_cache.pop(k, None)
+
+
+def _get_file_manager(request: Request):
+    """从 app.state 获取或创建 SclFileManager"""
+    from src.proto.iec61850.plugins.scl.service.file_manager import SclFileManager
+
+    if not request.app.state.scl_file_manager:
+        request.app.state.scl_file_manager = SclFileManager()
+    return request.app.state.scl_file_manager
+
+
+def _get_import_service(request: Request):
+    """从 app.state 获取或创建 SclImportService"""
+    from src.proto.iec61850.plugins.scl.service.import_service import SclImportService
+
+    if not request.app.state.scl_import_service:
+        request.app.state.scl_import_service = SclImportService()
+    return request.app.state.scl_import_service
+
+
+def _get_scl_file_path(request: Request, filename: str) -> str:
+    """获取 SCL 文件路径，不存在时抛出 NotFoundError"""
+    fm = _get_file_manager(request)
+    file_path = fm.get_file_path(filename)
+    if not file_path:
+        raise NotFoundError(f"文件不存在: {filename}")
+    return file_path
+
+
+# ===== 文件管理 =====
+
+
+@router.post("/upload", response_model=BaseResponse)
+async def upload_scl_file(request: Request, file: UploadFile = File(...)):
+    """上传 SCL 文件到服务器"""
+    fm = _get_file_manager(request)
+    content = await file.read()
+    try:
+        file_path = fm.save_uploaded_file(file.filename, content)
+    except ValueError as e:
+        raise ValidationError(str(e)) from e
+    # 上传新文件后清除该文件的缓存
+    _invalidate_cache_for(file_path)
+    return BaseResponse(
+        message="文件上传成功",
+        data={"filename": os.path.basename(file_path), "file_path": file_path, "size": len(content)},
+    )
+
+
+@router.get("/list", response_model=BaseResponse)
+async def list_scl_files(request: Request):
+    """列出所有 SCL 文件"""
+    fm = _get_file_manager(request)
+    files = [f.to_dict() for f in fm.list_files()]
+    return BaseResponse(data=files)
+
+
+@router.get("/detail", response_model=BaseResponse)
+async def get_scl_detail(request: Request, filename: str = Query(...)):
+    """获取 SCL 文件详情 (使用缓存，避免重复解析)"""
+    file_path = _get_scl_file_path(request, filename)
+
+    # 尝试从缓存获取
+    cached = _get_cached_result(request, file_path)
+    if cached:
+        return BaseResponse(data=cached)
+
+    # 缓存未命中，解析文件
+    service = _get_import_service(request)
+    result = service.preview_file(file_path)
+
+    stat = os.stat(file_path)
+    detail = {
+        "filename": filename,
+        "file_path": file_path,
+        "file_size": stat.st_size,
+        "ied_name": result.ied_name,
+        "point_counts": {
+            "yc": len(result.points.yc_points),
+            "yx": len(result.points.yx_points),
+            "yk": len(result.points.yk_points),
+            "yt": len(result.points.yt_points),
+        },
+        "gse_control_count": len(result.goose.gse_controls),
+        "report_control_count": len(result.reports.report_controls),
+        "validation": {
+            "is_valid": result.validation.is_valid,
+            "error_count": result.validation.error_count,
+            "warning_count": result.validation.warning_count,
+        },
+    }
+
+    # 写入缓存
+    _set_cached_result(request, file_path, detail)
+    return BaseResponse(data=detail)
+
+
+@router.delete("/delete", response_model=BaseResponse)
+async def delete_scl_file(request: Request, filename: str = Query(...)):
+    """删除 SCL 文件"""
+    fm = _get_file_manager(request)
+    file_path = fm.get_file_path(filename)
+    if not fm.delete_file(filename):
+        raise NotFoundError(f"文件不存在: {filename}")
+    if file_path:
+        _invalidate_cache_for(file_path)
+    return BaseResponse(message="文件删除成功")
+
+
+@router.get("/content")
+async def get_scl_raw_content(request: Request, filename: str = Query(...)):
+    """获取 SCL 文件原始 XML 内容"""
+    fm = _get_file_manager(request)
+    file_path = fm.get_file_path(filename)
+    if not file_path:
+        return PlainTextResponse("", status_code=404)
+    content = fm.read_file_content(filename)
+    if content is None:
+        return PlainTextResponse("", status_code=404)
+    return PlainTextResponse(content, media_type="application/xml")
+
+
+# ===== 解析与预览 =====
+
+
+@router.post("/preview", response_model=BaseResponse)
+async def preview_scl_file(request: Request, file: UploadFile = File(...)):
+    """预览 SCL 文件 (上传临时文件，解析后删除)"""
+    suffix = os.path.splitext(file.filename)[1] or ".icd"
+    with tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=suffix,
+        dir=get_storage_path("iec61850_temp_directory"),
+    ) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        service = _get_import_service(request)
+        result = service.preview_file(tmp_path)
+        return BaseResponse(message="预览成功", data=result.to_dict())
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+@router.post("/validate", response_model=BaseResponse)
+async def validate_scl_file(request: Request, filename: str = Form(...)):
+    """校验已上传的 SCL 文件 (使用缓存)"""
+    file_path = _get_scl_file_path(request, filename)
+
+    # 尝试从缓存获取
+    cached = _get_cached_result(request, file_path)
+    if cached:
+        validation = cached.get("validation", {})
+        return BaseResponse(data=validation)
+
+    service = _get_import_service(request)
+    result = service.import_file(file_path, validate=True)
+    data = {
+        "is_valid": result.validation.is_valid,
+        "error_count": result.validation.error_count,
+        "warning_count": result.validation.warning_count,
+        "issues": [str(i) for i in result.validation.issues],
+    }
+
+    # 写入缓存
+    _set_cached_result(request, file_path, {"validation": data})
+    return BaseResponse(data=data)
+
+
+@router.post("/parse", response_model=BaseResponse)
+async def parse_scl_file(request: Request, filename: str = Form(...)):
+    """解析 SCL 文件 (返回结构化模型摘要)"""
+    file_path = _get_scl_file_path(request, filename)
+
+    from src.proto.iec61850.plugins.scl.parser.scl_parser import SclParser
+
+    parser = SclParser()
+    doc = parser.parse_file(file_path)
+
+    # 返回结构化摘要 (不包含完整树，太大会截断)
+    ied_list = []
+    for ied in doc.ieds:
+        ld_count = sum(len(ap.server.ldevices) for ap in ied.access_points if ap.server)
+        ied_list.append(
+            {
+                "name": ied.name,
+                "desc": ied.desc,
+                "manufacturer": ied.manufacturer,
+                "ld_count": ld_count,
+            }
+        )
+
+    return BaseResponse(
+        data={
+            "header": {
+                "id": doc.header.id,
+                "version": doc.header.version,
+                "revision": doc.header.revision,
+                "tool_id": doc.header.tool_id,
+            },
+            "ieds": ied_list,
+            "type_counts": {
+                "l_node_types": len(doc.data_type_templates.ln_node_types),
+                "do_types": len(doc.data_type_templates.do_types),
+                "da_types": len(doc.data_type_templates.da_types),
+                "enum_types": len(doc.data_type_templates.enum_types),
+            },
+        }
+    )
+
+
+# ===== 导入 =====
+
+
+@router.post("/import-points", response_model=BaseResponse)
+async def import_points_from_scl(
+    request: Request,
+    channel_id: int = Form(...),
+    filename: str = Form(...),
+):
+    """从已上传的 SCL 文件导入模型信息到数据库
+
+    整改后行为 (v2.0):
+        - 不再将 61850 测点数据写入 point_yc/yx/yk/yt 表
+        - 将 ICD 文件保存到规范存储位置
+        - 在 channel/device 表中记录 ICD 文件路径
+        - 数据库仅保存 ICD 路径，模型以 ICD 文件为权威来源
+    """
+    require_iec61850_channel(channel_id)
+    file_path = _get_scl_file_path(request, filename)
+
+    # 使用 SclImportService 解析
+    service = _get_import_service(request)
+    result = service.import_file(file_path)
+
+    if not result.is_valid:
+        raise ValidationError(
+            f"校验失败: {result.validation.error_count} 个错误",
+            data=result.to_dict()["validation"],
+        )
+
+    # 保存到设备目录 (data/device/{device_name}/)
+    fm = _get_file_manager(request)
+    from src.data.service.channel_service import ChannelService
+
+    channel_info = ChannelService.get_channel_by_id(channel_id)
+    device_name = channel_info.get("name", result.ied_name) if channel_info else result.ied_name
+    dest_path = fm.save_to_device_dir(
+        source_path=file_path,
+        device_name=device_name,
+        original_filename=filename,
+        channel_id=channel_id,
+    )
+
+    # 计算文件 hash
+    file_hash = fm.compute_hash_from_file(dest_path)
+
+    # 在数据库记录 ICD 路径（不再写入 point_yc/yx/yk/yt 表）
+    ChannelService.update_channel(
+        channel_id,
+        model_name=result.ied_name,
+        icd_path=dest_path,
+        icd_file_hash=file_hash,
+    )
+
+    # 同步更新元数据中的设备关联
+    channel = ChannelService.get_channel_by_id(channel_id)
+    if channel and channel.get("device_id"):
+        fm.update_meta_device_assoc(dest_path, channel["device_id"], channel_id)
+
+    # 自动加载模型到内存
+    try:
+        device_controller = request.app.state.device_controller
+        device = device_controller.get_device_by_id(channel_id)
+        if device:
+            if device.load_iec61850_model(dest_path):
+                log.info(f"ICD 模型已自动加载到内存: {dest_path}")
+            else:
+                log.warning(f"ICD 模型加载到内存失败: {dest_path}")
+    except Exception as load_err:
+        log.warning(f"自动加载 ICD 模型异常 (非致命): {load_err}")
+
+    return BaseResponse(
+        message="ICD 模型导入成功 (测点数据不再写入数据库，以 ICD 文件为权威来源)",
+        data={
+            "ied_name": result.ied_name,
+            "icd_path": dest_path,
+            "file_hash": file_hash,
+            "yc_count": len(result.points.yc_points),
+            "yx_count": len(result.points.yx_points),
+            "yk_count": len(result.points.yk_points),
+            "yt_count": len(result.points.yt_points),
+            "goose_count": len(result.goose.gse_controls),
+            "report_count": len(result.reports.report_controls),
+        },
+    )
+
+
+@router.post("/import-goose", response_model=BaseResponse)
+async def import_goose_from_scl(
+    request: Request,
+    channel_id: int = Form(...),
+    filename: str = Form(...),
+    interface: str = Form("eth0"),
+):
+    """从已上传的 SCL 文件导入 GOOSE 配置"""
+    require_iec61850_channel(channel_id)
+    file_path = _get_scl_file_path(request, filename)
+
+    service = _get_import_service(request)
+    result = service.import_file(file_path)
+
+    # 构建 GOOSE 响应 (兼容 import_goose_from_icd 格式)
+    publishers = [gse.to_publisher_dict(interface) for gse in result.goose.gse_controls]
+    subscriptions = [gse.to_subscription_dict() for gse in result.goose.gse_controls]
+
+    return BaseResponse(
+        message="GOOSE 配置解析成功",
+        data={
+            "publishers": publishers,
+            "subscriptions": subscriptions,
+            "pure_datasets": result.goose.pure_datasets,
+            "report_controls": [
+                {
+                    "ld_inst": rc.ld_inst,
+                    "name": rc.name,
+                    "rcb_type": rc.rcb_type,
+                    "rpt_id": rc.rpt_id,
+                    "dat_set": rc.dat_set,
+                    "data_set_ref": rc.data_set_ref,
+                    "conf_rev": rc.conf_rev,
+                    "buf_time": rc.buf_time,
+                    "intg_period": rc.intg_period,
+                    "ln_name": rc.ln_name,
+                    "trg_ops": rc.trg_ops,
+                    "opt_fields": rc.opt_fields,
+                    "entries": rc.entries,
+                }
+                for rc in result.reports.report_controls
+            ],
+            "summary": {
+                "gse_control_count": len(result.goose.gse_controls),
+                "gse_controls": [
+                    {
+                        "go_cb_ref": g.go_cb_ref,
+                        "go_id": g.name,
+                        "app_id": g.app_id or g.gse_app_id,
+                        "dat_set": g.dat_set,
+                        "conf_rev": g.conf_rev,
+                        "mac_address": g.mac_address,
+                        "dataset_member_count": len(g.dataset_members),
+                    }
+                    for g in result.goose.gse_controls
+                ],
+            },
+        },
+    )
+
+
+@router.post("/import-full", response_model=BaseResponse)
+async def import_full_from_scl(
+    request: Request,
+    channel_id: int = Form(...),
+    filename: str = Form(...),
+    interface: str = Form("eth0"),
+):
+    """完整导入 SCL 文件 (模型 + GOOSE + Report)
+
+    整改后行为 (v2.0):
+        - 不再将 61850 测点数据写入 point_yc/yx/yk/yt 表
+        - 将 ICD 文件保存到规范存储位置
+        - 在 channel/device 表中记录 ICD 文件路径
+        - 数据库仅保存 ICD 路径，模型以 ICD 文件为权威来源
+    """
+    require_iec61850_channel(channel_id)
+    file_path = _get_scl_file_path(request, filename)
+
+    service = _get_import_service(request)
+    result = service.import_file(file_path)
+
+    # 保存到设备目录 (data/device/{device_name}/)
+    fm = _get_file_manager(request)
+    from src.data.service.channel_service import ChannelService
+
+    channel_info = ChannelService.get_channel_by_id(channel_id)
+    device_name = channel_info.get("name", result.ied_name) if channel_info else result.ied_name
+    dest_path = fm.save_to_device_dir(
+        source_path=file_path,
+        device_name=device_name,
+        original_filename=filename,
+        channel_id=channel_id,
+    )
+
+    # 计算文件 hash
+    file_hash = fm.compute_hash_from_file(dest_path)
+
+    # 在数据库记录 ICD 路径（不再写入 point_yc/yx/yk/yt 表）
+    ChannelService.update_channel(
+        channel_id,
+        model_name=result.ied_name,
+        icd_path=dest_path,
+        icd_file_hash=file_hash,
+    )
+
+    # 同步更新元数据中的设备关联
+    channel = ChannelService.get_channel_by_id(channel_id)
+    if channel and channel.get("device_id"):
+        fm.update_meta_device_assoc(dest_path, channel["device_id"], channel_id)
+
+    # 自动加载模型到内存
+    try:
+        device_controller = request.app.state.device_controller
+        device = device_controller.get_device_by_id(channel_id)
+        if device:
+            if device.load_iec61850_model(dest_path):
+                log.info(f"ICD 模型已自动加载到内存: {dest_path}")
+            else:
+                log.warning(f"ICD 模型加载到内存失败: {dest_path}")
+    except Exception as load_err:
+        log.warning(f"自动加载 ICD 模型异常 (非致命): {load_err}")
+
+    # 构建 GOOSE 响应
+    goose_data = result.to_dict()
+
+    return BaseResponse(
+        message="完整导入成功 (测点数据不再写入数据库，以 ICD 文件为权威来源)",
+        data={
+            "ied_name": result.ied_name,
+            "icd_path": dest_path,
+            "file_hash": file_hash,
+            "yc_count": len(result.points.yc_points),
+            "yx_count": len(result.points.yx_points),
+            "yk_count": len(result.points.yk_points),
+            "yt_count": len(result.points.yt_points),
+            "goose": goose_data.get("goose"),
+            "report_controls": goose_data.get("report_controls", []),
+        },
+    )
+
+
+# ===== 浏览 =====
+
+
+@router.get("/browse-tree", response_model=BaseResponse)
+async def browse_scl_tree(request: Request, filename: str = Query(...)):
+    """浏览 SCL 文件结构树"""
+    file_path = _get_scl_file_path(request, filename)
+
+    from src.proto.iec61850.plugins.scl.parser.scl_parser import SclParser
+
+    parser = SclParser()
+    doc = parser.parse_file(file_path)
+
+    # 构建树形结构
+    tree = {"header": {"id": doc.header.id, "version": doc.header.version}, "ieds": []}
+
+    for ied in doc.ieds:
+        ied_node = {"name": ied.name, "desc": ied.desc, "access_points": []}
+        for ap in ied.access_points:
+            ap_node = {"name": ap.name, "ldevices": []}
+            if ap.server:
+                for ld in ap.server.ldevices:
+                    ld_node = {"inst": ld.inst, "desc": ld.desc, "logical_nodes": []}
+                    all_lns = ([ld.ln0] + ld.lns) if ld.ln0 else ld.lns
+                    for ln in all_lns:
+                        # 构造 DO 列表 (带 DA 数量)
+                        do_list = []
+                        for doi in ln.dois:
+                            do_list.append(
+                                {
+                                    "name": doi.name,
+                                    "desc": doi.desc,
+                                    "dai_count": len(doi.dai_values),
+                                }
+                            )
+                        ln_node = {
+                            "ln_name": ln.ln_name,
+                            "ln_class": ln.ln_class,
+                            "ln_type": ln.ln_type,
+                            "do_count": len(ln.dois),
+                            "dois": do_list,
+                            "dataset_count": len(ln.datasets),
+                            "gse_control_count": len(ln.gse_controls),
+                            "report_control_count": len(ln.report_controls),
+                        }
+                        ld_node["logical_nodes"].append(ln_node)
+                    ap_node["ldevices"].append(ld_node)
+            ied_node["access_points"].append(ap_node)
+        tree["ieds"].append(ied_node)
+
+    return BaseResponse(data=tree)
+
+
+# ===== 对比 =====
+
+
+@router.post("/diff", response_model=BaseResponse)
+async def diff_scl_files(
+    request: Request,
+    filename_a: str = Form(...),
+    filename_b: str = Form(...),
+):
+    """对比两个 SCL 文件"""
+    fm = _get_file_manager(request)
+
+    path_a = fm.get_file_path(filename_a)
+    path_b = fm.get_file_path(filename_b)
+    if not path_a:
+        raise NotFoundError(f"文件不存在: {filename_a}")
+    if not path_b:
+        raise NotFoundError(f"文件不存在: {filename_b}")
+
+    from src.proto.iec61850.plugins.scl.parser.scl_parser import SclParser
+
+    parser = SclParser()
+    doc_a = parser.parse_file(path_a)
+    doc_b = parser.parse_file(path_b)
+
+    # 简单对比: IED 名称、类型数量、测点数量
+    diff = {
+        "file_a": filename_a,
+        "file_b": filename_b,
+        "ied_names": {
+            "a": [ied.name for ied in doc_a.ieds],
+            "b": [ied.name for ied in doc_b.ieds],
+            "added": [ied.name for ied in doc_b.ieds if ied.name not in {i.name for i in doc_a.ieds}],
+            "removed": [ied.name for ied in doc_a.ieds if ied.name not in {i.name for i in doc_b.ieds}],
+        },
+        "type_counts": {
+            "a": {
+                "l_node_types": len(doc_a.data_type_templates.ln_node_types),
+                "do_types": len(doc_a.data_type_templates.do_types),
+                "da_types": len(doc_a.data_type_templates.da_types),
+                "enum_types": len(doc_a.data_type_templates.enum_types),
+            },
+            "b": {
+                "l_node_types": len(doc_b.data_type_templates.ln_node_types),
+                "do_types": len(doc_b.data_type_templates.do_types),
+                "da_types": len(doc_b.data_type_templates.da_types),
+                "enum_types": len(doc_b.data_type_templates.enum_types),
+            },
+        },
+    }
+
+    # 测点数量对比
+    from src.proto.iec61850.plugins.scl.transformer.point_transformer import SclPointTransformer
+
+    pts_a = SclPointTransformer(doc_a).transform()
+    pts_b = SclPointTransformer(doc_b).transform()
+    diff["point_counts"] = {
+        "a": pts_a.to_count_tuple(),
+        "b": pts_b.to_count_tuple(),
+    }
+
+    return BaseResponse(data=diff)
+
+
+# ===== IED 列表 =====
+
+
+@router.get("/ied-list", response_model=BaseResponse)
+async def get_scl_ied_list(request: Request, filename: str = Query(...)):
+    """获取 SCL 文件中的 IED 列表"""
+    file_path = _get_scl_file_path(request, filename)
+
+    from src.proto.iec61850.plugins.scl.parser.scl_parser import SclParser
+
+    parser = SclParser()
+    doc = parser.parse_file(file_path)
+
+    ieds = [
+        {
+            "name": ied.name,
+            "desc": ied.desc,
+            "manufacturer": ied.manufacturer,
+            "config_revision": ied.config_revision,
+            "access_point_count": len(ied.access_points),
+        }
+        for ied in doc.ieds
+    ]
+
+    return BaseResponse(data=ieds)

@@ -1,0 +1,278 @@
+:root {
+    /* 调整侧边栏宽度 */
+    --vp-sidebar-width: 300px;
+
+    /* 让布局占满全屏，消除左侧留白 */
+    --vp-layout-max-width: 100%;
+
+    /* 文档内容区宽度动态适配：大屏用足空间，小屏避免溢出 */
+    --vp-content-max-width: min(1920px, calc(100vw - var(--vp-sidebar-width) - 5rem));
+}
+
+/* 适配移动端或窄屏 */
+@media (min-width: 960px) {
+    .VPContent {
+        /* 使用变量保持与侧边栏宽度一致 */
+        padding-left: var(--vp-sidebar-width);
+    }
+}
+
+/* 增大侧边栏条目 */
+.VPSidebarItem .text {
+    font-size: 15px !important;
+    font-weight: 500;
+}
+
+.VPSidebarItem .link {
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
+}
+
+.VPSidebarItem .link:hover .text {
+    color: var(--vp-c-text-1) !important;
+}
+
+/* 侧边栏交互效果优化 */
+.VPSidebarItem>.item {
+    transition: background-color 0.25s;
+    border-radius: 8px;
+    /* 去除负边距，由于外壳去除了右留白，现在直接用 padding 控制即可 */
+    margin-right: 0 !important;
+    margin-left: -16px;
+    /* 侧边栏整体留白变小，向边缘靠拢 */
+    padding: 4px 24px 4px 16px !important;
+}
+
+/* 悬停效果：整个块背景变色，文字不动 */
+.VPSidebarItem>.item:hover {
+    background-color: rgba(193, 195, 198, 0.15) !important;
+}
+
+/* 选中效果：整个块变色（浅蓝色） */
+.VPSidebarItem.is-active>.item {
+    background-color: rgba(193, 195, 198, 0.15) !important;
+}
+
+/* 强制选中时文字颜色保持普通文本颜色，不额外变色 */
+.VPSidebarItem.is-active .item .text {
+    color: var(--vp-c-text-1) !important;
+}
+
+/* 清除 link 上的干扰样式 */
+.VPSidebarItem .link {
+    transition: none;
+    margin-right: 0;
+    /* margin 移到 item 上 */
+}
+
+.VPSidebarItem>.item>.link:hover {
+    transform: none;
+    background-color: transparent;
+}
+
+/* 侧边栏分组标题样式优化 */
+.VPSidebarItem.level-0 .text {
+    font-weight: 700;
+    color: var(--vp-c-text-1);
+}
+
+/* 二级分类标题 (如"架构重构""功能开发") 样式 */
+.VPSidebarItem.level-1 .text {
+    font-size: 13px !important;
+    font-weight: 600;
+    color: var(--vp-c-text-2);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* 二级分类标题不可点击时降低交互样式 */
+.VPSidebarItem.level-1:not(.has-link) > .item {
+    cursor: default;
+}
+
+.VPSidebarItem.level-1:not(.has-link) > .item:hover {
+    background-color: transparent !important;
+}
+
+/* 二级分类标题整体缩进，与一级标题区分层级 */
+.VPSidebarItem.level-1 > .item {
+    padding-left: 28px !important;
+}
+
+/* 子菜单选项额外缩进（层级递进） */
+.VPSidebarItem.level-1 .item .link {
+    padding-left: 0 !important;
+}
+
+.VPSidebarItem.level-2 > .item {
+    padding-left: 44px !important;
+}
+
+.VPSidebarItem.level-2 .item .link {
+    padding-left: 0 !important;
+}
+
+.VPSidebarItem.level-2 .text {
+    font-size: 14px !important;
+    font-weight: 400;
+}
+
+.VPSidebarItem.level-3 > .item {
+    padding-left: 60px !important;
+}
+
+.VPSidebarItem.level-3 .item .link {
+    padding-left: 0 !important;
+}
+
+.VPSidebarItem.level-4 > .item {
+    padding-left: 76px !important;
+}
+
+.VPSidebarItem.level-4 .item .link {
+    padding-left: 0 !important;
+}
+
+/* 去除侧边栏与主体之间的垂直分割线，解锁右侧留白限制 */
+.VPSidebar {
+    border-right: none !important;
+    /* 关键修复：去除 Vitepress 容器默认死板的 32px 右侧留白 (死角区) */
+    padding-right: 0 !important;
+}
+
+/* 确保内部各级菜单容器占满剩下的空间 */
+.VPSidebar .nav,
+.VPSidebar .group,
+.VPSidebarItem {
+    width: 100% !important;
+}
+
+/* 去除菜单左侧自带的层级提示竖线/边框 */
+.VPSidebarItem .item {
+    border-left: none !important;
+}
+
+/* 隐藏 VitePress 自带的选中项指示竖条 */
+.VPSidebarItem .indicator {
+    display: none !important;
+}
+
+/* 去除侧边栏一级菜单组(Group)之间的水平分割线 */
+.VPSidebarGroup,
+.VPSidebarGroup+.VPSidebarGroup,
+section.VPSidebarItem.level-0,
+.VPSidebar .divider,
+.VPSidebarItem.level-0 {
+    border-top: none !important;
+    border-bottom: none !important;
+    padding-top: 0 !important;
+    /* Vitepress 有时不仅用 border，还用 padding 隔开各 section */
+}
+
+/* 强力清除 VitePress 默认加在 section 或 div 上的所有 border */
+.VPSidebarGroup>section,
+.VPSidebarGroup>.group,
+.group+.group,
+.VPSidebarGroup+.VPSidebarGroup {
+    border-top: 0 !important;
+    border-bottom: 0 !important;
+}
+
+/* 隐藏可能存在的默认水平线元素 */
+.VPSidebar .divider,
+.VPSidebarGroup hr,
+.VPSidebar hr {
+    display: none !important;
+    border: none !important;
+    opacity: 0 !important;
+}
+
+/* =========================================
+   缩小菜单和上下级子菜单之间的垂直留白
+   ========================================= */
+
+/* 1. 大幅减小一级标题与其下方子菜单之间的间距（VitePress 默认高达 24px） */
+.VPSidebarItem.level-0 {
+    padding-bottom: 4px !important;
+}
+
+.VPSidebarItem.collapsed.level-0 {
+    padding-bottom: 4px !important;
+}
+
+/* 2. 减小所有层级标题本身在垂直方向占据的高度 */
+.VPSidebarItem .text {
+    line-height: 20px !important;
+}
+
+.VPSidebarItem .link {
+    line-height: 20px !important;
+}
+
+/* 3. 紧缩上方分组与下方分组之间的边距 */
+.VPSidebarGroup {
+    padding-top: 12px !important;
+    padding-bottom: 0 !important;
+}
+
+/* =========================================
+   自定义滚动条样式 (类似 Element UI)
+   ========================================= */
+*::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 3px;
+}
+
+*:hover::-webkit-scrollbar-thumb {
+    background: rgba(144, 147, 153, 0.3);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background: rgba(144, 147, 153, 0.5) !important;
+}
+
+/* =========================================
+   调整标题分割线与间距（保留分割线，收紧留白）
+   默认 h2: margin-top 48px, padding-top 24px → 太松散
+   ========================================= */
+.vp-doc h2 {
+    margin-top: 24px !important;
+    margin-bottom: 8px !important;
+    padding-top: 12px !important;
+}
+
+.vp-doc h3 {
+    margin-top: 16px !important;
+    margin-bottom: 4px !important;
+}
+
+.doc-comments {
+    margin-top: 48px;
+    padding-top: 24px;
+    border-top: 1px solid var(--vp-c-divider);
+}
+
+.doc-comments h2 {
+    margin-bottom: 16px;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.doc-comments .utterances {
+    max-width: 100%;
+}
+
+.home-comments {
+    max-width: 1152px;
+    margin: 0 auto;
+    padding: 0 24px 64px;
+}

@@ -1,0 +1,609 @@
+"""通道管理 - 通道 CRUD 路由"""
+
+import asyncio
+
+from fastapi import APIRouter, Request
+
+from src.config.config import Config
+from src.data.dao.point_dao import PointDao
+from src.data.service.channel_configuration_service import ChannelConfigurationService
+from src.data.service.channel_service import ChannelService
+from src.data.service.device_group_service import DeviceGroupService
+from src.data.service.opcua_device_configuration_service import OpcUaDeviceConfigurationService
+from src.data.service.opcua_node_service import OpcUaNodeService
+from src.data.service.opcua_point_import import OpcUaPointImportService
+from src.data.service.point_mapping_service import PointMappingService
+from src.device.protocol.runtime_config import normalize_protocol_params
+from src.enums.modbus_def import ProtocolType
+from src.web.api.channel.helpers import (
+    get_device_builder,
+    reload_device_instance,
+)
+from src.web.api.exceptions import ConflictError, NotFoundError, OperationError, ValidationError
+from src.web.api.schemas import (
+    BaseResponse,
+    ChannelCreateRequest,
+    ChannelDeleteRequest,
+    ChannelDetailRequest,
+    ChannelUpdateRequest,
+)
+from src.web.log import log
+
+router = APIRouter(tags=["channel"])
+
+_RUNTIME_CHANNEL_FIELDS = (
+    "ip",
+    "port",
+    "com_port",
+    "baud_rate",
+    "data_bits",
+    "stop_bits",
+    "parity",
+    "rtu_addr",
+    "model_name",
+)
+
+
+def _runtime_configuration_changed(
+    existing: dict,
+    req: ChannelUpdateRequest,
+    normalized_params: dict | None,
+    existing_params: dict | None,
+) -> bool:
+    """Return whether an edit requires replacing the in-memory device."""
+    protocol_type = req.protocol_type if req.protocol_type is not None else existing.get("protocol_type", 1)
+    conn_type = req.conn_type if req.conn_type is not None else existing.get("conn_type", 1)
+    if protocol_type != existing.get("protocol_type", 1) or conn_type != existing.get("conn_type", 1):
+        return True
+
+    for field in _RUNTIME_CHANNEL_FIELDS:
+        value = getattr(req, field)
+        if value is None:
+            continue
+        old_value = existing.get(field)
+        if field == "rtu_addr":
+            if str(value) != str(old_value):
+                return True
+        elif value != old_value:
+            return True
+
+    return normalized_params is not None and normalized_params != existing_params
+
+
+# 协议类型映射
+PROTOCOL_OPTIONS = [
+    {"value": 0, "label": "Modbus RTU", "conn_types": [0, 3]},
+    {"value": 1, "label": "Modbus TCP", "conn_types": [1, 2]},
+    {"value": 2, "label": "IEC 104", "conn_types": [1, 2]},
+    {"value": 3, "label": "DL/T645-2007", "conn_types": [0, 1, 2, 3]},
+    {"value": 4, "label": "IEC 61850", "conn_types": [1, 2]},
+    {"value": 5, "label": "DNP3", "conn_types": [1, 2]},
+    {"value": 6, "label": "IEC 101", "conn_types": [0, 3]},
+    {"value": 7, "label": "OPC UA", "conn_types": [1, 2]},
+    {"value": 8, "label": "DL/T 698.45", "conn_types": [0, 1, 2, 3]},
+]
+
+# 连接类型映射
+CONN_TYPE_OPTIONS = [
+    {"value": 0, "label": "RTU主站"},
+    {"value": 1, "label": "TCP客户端"},
+    {"value": 2, "label": "TCP服务端"},
+    {"value": 3, "label": "RTU从站"},
+]
+
+
+def _validate_protocol_connection(protocol_type: int, conn_type: int) -> None:
+    option = next((item for item in PROTOCOL_OPTIONS if item["value"] == protocol_type), None)
+    if not option:
+        raise ValidationError(f"不支持的协议类型: {protocol_type}")
+    if conn_type not in option["conn_types"]:
+        raise ValidationError(f"协议 {option['label']} 不支持连接类型 {conn_type}")
+
+
+def _server_ip_conflicts(ip_a: str | None, ip_b: str | None) -> bool:
+    """判断两个服务端 IP 是否互相冲突。
+
+    0.0.0.0（或空值）表示监听所有 IP，与任何具体 IP 同端口都会冲突；
+    否则仅相同 IP 才冲突（如 192.168.0.1 与 192.168.0.2 不冲突）。
+    """
+    a = (ip_a or "").strip()
+    b = (ip_b or "").strip()
+    if a in ("0.0.0.0", "") or b in ("0.0.0.0", ""):
+        return True
+    return a == b
+
+
+def _validate_server_endpoint_unique(
+    ip: str | None,
+    port: int | None,
+    exclude_channel_id: int | None = None,
+) -> None:
+    """校验 TCP 服务端 IP+端口 组合唯一。
+
+    TCP 服务端（conn_type=2）的唯一标识是 IP+端口，而非端口号本身；
+    其中 0.0.0.0 表示监听所有 IP，与任何具体 IP 的同端口均冲突。
+    exclude_channel_id 用于编辑场景排除自身。
+    """
+    if port is None or port == 0:
+        return
+    for ch in ChannelService.get_all_channels():
+        if ch.get("conn_type") != 2:
+            continue
+        if exclude_channel_id is not None and ch.get("id") == exclude_channel_id:
+            continue
+        if str(ch.get("port") or "") != str(port):
+            continue
+        if not _server_ip_conflicts(ch.get("ip"), ip):
+            continue
+        raise ValidationError(
+            f"服务端地址 {ip or '未指定IP'}:{port} 已被设备 '{ch.get('name')}' 占用，请使用其他 IP 或端口"
+        )
+
+
+@router.post("/protocols", response_model=BaseResponse)
+async def get_protocols():
+    """获取支持的协议列表"""
+    return BaseResponse(
+        message="获取协议列表成功",
+        data={"protocols": PROTOCOL_OPTIONS, "conn_types": CONN_TYPE_OPTIONS},
+    )
+
+
+@router.post("/serial-ports", response_model=BaseResponse)
+async def get_serial_ports():
+    """获取可用的串口列表"""
+    from src.tools.serial_port_detector import SerialPortDetector
+
+    ports = await asyncio.to_thread(SerialPortDetector.get_available_ports)
+    return BaseResponse(message="获取串口列表成功", data=ports)
+
+
+@router.post("/create", response_model=BaseResponse)
+async def create_channel(req: ChannelCreateRequest, request: Request):
+    """创建通道/设备"""
+    _validate_protocol_connection(req.protocol_type, req.conn_type)
+
+    existing = await asyncio.to_thread(ChannelService.get_channel_by_code, req.code)
+    if existing:
+        raise ValidationError(f"设备编码 '{req.code}' 已存在，请使用其他编码")
+
+    if req.conn_type == 2:
+        _validate_server_endpoint_unique(req.ip, req.port)
+    opcua_prepared = None
+    if req.opcua_config is not None:
+        if req.protocol_type != 7:
+            raise ValidationError("OPC UA 配置仅适用于 OPC UA 协议")
+        try:
+            opcua_prepared = await asyncio.to_thread(
+                OpcUaDeviceConfigurationService.prepare,
+                req.opcua_config,
+                req.ip,
+                req.port,
+                req.conn_type,
+            )
+        except ValueError as exc:
+            raise ValidationError(_opcua_validation_message(exc)) from exc
+    if req.protocol_type == 7 and opcua_prepared is None:
+        from src.proto.opcua.core.transport import loopback_endpoint, make_endpoint_url
+
+        try:
+            loopback_endpoint(make_endpoint_url(req.ip, req.port))
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+
+    params = req.protocol_params
+    if req.dlt698_config is not None:
+        if req.protocol_type != 8:
+            raise ValidationError("dlt698_config 仅用于 DL/T 698")
+        from src.web.api.schemas.channel import ProtocolParamsRequest
+
+        params = ProtocolParamsRequest(values=req.dlt698_config.model_dump())
+    try:
+        normalize_protocol_params(
+            req.protocol_type,
+            req.conn_type,
+            params.values if params else None,
+        )
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+    device_id, channel_id = await asyncio.to_thread(
+        ChannelService.provision_channel,
+        code=req.code,
+        name=req.name,
+        group_id=req.group_id,
+        protocol_type=req.protocol_type,
+        conn_type=req.conn_type,
+        protocol_params=params.values if params else None,
+        protocol_schema_version=params.schema_version if params else 1,
+        opcua_prepared=opcua_prepared,
+        ip=req.ip,
+        port=req.port,
+        com_port=req.com_port,
+        baud_rate=req.baud_rate,
+        data_bits=req.data_bits,
+        stop_bits=req.stop_bits,
+        parity=req.parity,
+        rtu_addr=req.rtu_addr if req.protocol_type == 3 else "1",
+        dlt645_point_mode=req.dlt645_point_mode if req.protocol_type == 3 else "import",
+        dlt698_point_mode=req.dlt698_point_mode if req.protocol_type == 8 else "import",
+        change_tracking_enabled=req.change_tracking_enabled,
+        model_name=req.model_name if req.protocol_type == 4 else None,
+    )
+
+    try:
+        device_controller = request.app.state.device_controller
+        builder = get_device_builder(channel_id, req.code)
+
+        channel_data_mock = {"id": channel_id, "protocol_type": req.protocol_type, "conn_type": req.conn_type}
+        protocol_enum = ChannelService.get_protocol_type(channel_data_mock)
+
+        if req.conn_type in [0, 3]:
+            builder.setDeviceSerialConfig(
+                serial_port=req.com_port or "",
+                baudrate=req.baud_rate or 9600,
+                databits=req.data_bits or 8,
+                stopbits=req.stop_bits or 1,
+                parity=req.parity or "E",
+            )
+        else:
+            if protocol_enum in [
+                ProtocolType.ModbusTcpClient,
+                ProtocolType.Iec104Client,
+                ProtocolType.Dlt645Client,
+                ProtocolType.Iec61850Client,
+                ProtocolType.Dnp3Client,
+                ProtocolType.OpcUaClient,
+                ProtocolType.Dlt698Client,
+                ProtocolType.Dlt698Server,
+            ]:
+                builder.setDeviceNetConfig(port=req.port, ip=req.ip)
+            else:
+                builder.setDeviceNetConfig(
+                    port=req.port,
+                    ip=req.ip or Config.DEFAULT_IP,
+                )
+
+        # 传递 IEC61850 IED 模型名称
+        if protocol_enum in (ProtocolType.Iec61850Server, ProtocolType.Iec61850Client):
+            if req.model_name:
+                builder.setDeviceModelName(req.model_name)
+
+        runtime_config = await asyncio.to_thread(
+            ChannelConfigurationService.get_protocol_params,
+            channel_id,
+            req.protocol_type,
+            req.conn_type,
+        )
+        builder.setDeviceRuntimeConfig(runtime_config["values"])
+        security_config = await asyncio.to_thread(
+            ChannelConfigurationService.get_runtime_security,
+            channel_id,
+        )
+        builder.setDeviceSecurityConfig(security_config)
+
+        new_device = await asyncio.to_thread(
+            builder.makeGeneralDevice,
+            device_id=channel_id,
+            device_name=req.name,
+            protocol_type=protocol_enum,
+            is_start=False,
+        )
+        new_device.name = req.name
+        device_controller.device_list.append(new_device)
+        device_controller.device_map[new_device.name] = new_device
+        mappings = await asyncio.to_thread(PointMappingService.get_all_mappings)
+        await asyncio.to_thread(new_device.set_device_provider, device_controller, mappings)
+        log.info(f"设备 {req.name} (ID: {channel_id}) 已在内存中动态创建")
+    except Exception as e:
+        log.error(f"内存同步创建设备失败: {e}")
+        if req.protocol_type in (7, 8):
+            raise OperationError("协议配置已保存，但设备实例创建失败，请检查配置后重试") from e
+
+    return BaseResponse(
+        message="创建通道成功",
+        data={"channel_id": channel_id, "device_id": device_id},
+    )
+
+
+@router.post("/delete", response_model=BaseResponse)
+async def delete_channel(req: ChannelDeleteRequest, request: Request):
+    """删除通道"""
+    device_controller = request.app.state.device_controller
+    await device_controller.remove_device_by_id(req.channel_id)
+    await asyncio.to_thread(ChannelConfigurationService.delete_for_channel, req.channel_id)
+    success = await asyncio.to_thread(ChannelService.delete_channel, req.channel_id)
+    if not success:
+        raise NotFoundError("通道不存在", data=False)
+    return BaseResponse(message="删除通道成功", data=True)
+
+
+@router.post("/list", response_model=BaseResponse)
+async def get_channel_list():
+    """获取所有通道列表"""
+    channels = await asyncio.to_thread(ChannelService.get_all_channels)
+    return BaseResponse(message="获取通道列表成功", data=channels)
+
+
+@router.post("/detail", response_model=BaseResponse)
+async def get_channel_by_id(req: ChannelDetailRequest):
+    """获取单个通道详情"""
+    channel = await asyncio.to_thread(ChannelService.get_channel_by_id, req.channel_id)
+    if channel:
+        channel["protocol_params"] = await asyncio.to_thread(
+            ChannelConfigurationService.get_protocol_params,
+            req.channel_id,
+            channel.get("protocol_type", 1),
+            channel.get("conn_type", 1),
+        )
+        channel["security_config"] = await asyncio.to_thread(
+            ChannelConfigurationService.get_security_config,
+            req.channel_id,
+        )
+        if channel.get("protocol_type") == 7:
+            channel["opcua_config"] = await asyncio.to_thread(
+                OpcUaDeviceConfigurationService.public,
+                req.channel_id,
+            )
+        if channel.get("protocol_type") == 8:
+            channel["dlt698_config"] = channel["protocol_params"]["values"]
+    if not channel:
+        raise NotFoundError("通道不存在")
+    return BaseResponse(message="获取通道详情成功", data=channel)
+
+
+@router.post("/update", response_model=BaseResponse)
+async def update_channel(req: ChannelUpdateRequest, request: Request):
+    """更新通道配置"""
+    channel_id = req.channel_id
+    existing = await asyncio.to_thread(ChannelService.get_channel_by_id, channel_id)
+    if not existing:
+        raise NotFoundError("通道不存在")
+
+    protocol_to_use = req.protocol_type if req.protocol_type is not None else existing.get("protocol_type", 1)
+    conn_type_to_use = req.conn_type if req.conn_type is not None else existing.get("conn_type", 1)
+    dlt645_point_mode_to_use = (
+        req.dlt645_point_mode if req.dlt645_point_mode is not None else existing.get("dlt645_point_mode", "import")
+    )
+    _validate_protocol_connection(protocol_to_use, conn_type_to_use)
+
+    old_protocol = existing.get("protocol_type", 1)
+    if old_protocol == 8 and protocol_to_use != 8:
+        from src.data.service.dlt698_service import Dlt698Service
+
+        if await asyncio.to_thread(Dlt698Service.points, channel_id):
+            raise ConflictError("请先清理 DL/T 698 测点，再切换协议")
+    if old_protocol == 7 and conn_type_to_use != existing.get("conn_type"):
+        has_nodes = await asyncio.to_thread(OpcUaNodeService.has_nodes, channel_id)
+        has_points = await asyncio.to_thread(OpcUaPointImportService.has_points, channel_id)
+        if has_nodes or has_points:
+            raise ConflictError("已有 OPC UA 测点或节点定义时不能切换客户端/服务端角色")
+    if protocol_to_use != old_protocol:
+        point_count = await asyncio.to_thread(PointDao.count_points_by_channel, channel_id)
+        has_opcua_nodes = old_protocol == 7 and await asyncio.to_thread(OpcUaNodeService.has_nodes, channel_id)
+        has_opcua_points = old_protocol == 7 and await asyncio.to_thread(OpcUaPointImportService.has_points, channel_id)
+        has_iec61850_model = bool(existing.get("icd_path") or existing.get("model_name"))
+        if point_count or has_iec61850_model or has_opcua_nodes or has_opcua_points:
+            raise ConflictError(
+                "通道已有测点或协议模型，不能直接切换协议；请先显式清理原协议数据",
+                data={
+                    "point_count": point_count,
+                    "has_iec61850_model": has_iec61850_model,
+                    "has_opcua_nodes": has_opcua_nodes,
+                    "has_opcua_points": has_opcua_points,
+                },
+            )
+
+    params = req.protocol_params
+    normalized_params = None
+    if req.dlt698_config is not None:
+        if protocol_to_use != 8:
+            raise ValidationError("dlt698_config 仅用于 DL/T 698")
+        from src.web.api.schemas.channel import ProtocolParamsRequest
+
+        params = ProtocolParamsRequest(values=req.dlt698_config.model_dump())
+    existing_params = None
+    protocol_combination_changed = protocol_to_use != existing.get(
+        "protocol_type", 1
+    ) or conn_type_to_use != existing.get("conn_type", 1)
+    if params is not None:
+        try:
+            normalized_params = normalize_protocol_params(protocol_to_use, conn_type_to_use, params.values)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        current_protocol_params = await asyncio.to_thread(
+            ChannelConfigurationService.get_protocol_params,
+            channel_id,
+            existing.get("protocol_type", 1),
+            existing.get("conn_type", 1),
+        )
+        existing_params = current_protocol_params["values"]
+
+    runtime_configuration_changed = _runtime_configuration_changed(
+        existing,
+        req,
+        normalized_params,
+        existing_params,
+    )
+
+    requested_updates = {
+        field: value
+        for field in (
+            "name",
+            "protocol_type",
+            "conn_type",
+            "ip",
+            "port",
+            "com_port",
+            "baud_rate",
+            "data_bits",
+            "stop_bits",
+            "parity",
+            "change_tracking_enabled",
+        )
+        if (value := getattr(req, field)) is not None
+    }
+    if protocol_to_use == 3:
+        if req.rtu_addr is not None:
+            requested_updates["rtu_addr"] = req.rtu_addr
+        requested_updates["dlt645_point_mode"] = dlt645_point_mode_to_use
+    else:
+        if protocol_combination_changed:
+            requested_updates["rtu_addr"] = "1"
+        requested_updates["dlt645_point_mode"] = "import"
+    if protocol_to_use == 8:
+        requested_updates["dlt698_point_mode"] = req.dlt698_point_mode or existing.get("dlt698_point_mode", "import")
+    elif protocol_combination_changed:
+        requested_updates["dlt698_point_mode"] = "import"
+    if protocol_to_use == 4:
+        if req.model_name is not None:
+            requested_updates["model_name"] = req.model_name
+    elif protocol_combination_changed:
+        requested_updates["model_name"] = None
+
+    # TCP 服务端唯一性检测只在切换为服务端或端点实际变化时执行。
+    # 名称、分组等无关编辑不应查询真实通道表，更不应被历史冲突数据阻断。
+    new_ip = req.ip if req.ip is not None else existing.get("ip")
+    new_port = req.port if req.port is not None else existing.get("port")
+    opcua_prepared = None
+    if req.opcua_config is not None:
+        if protocol_to_use != 7:
+            raise ValidationError("OPC UA 配置仅适用于 OPC UA 协议")
+        try:
+            opcua_prepared = await asyncio.to_thread(
+                OpcUaDeviceConfigurationService.prepare,
+                req.opcua_config,
+                new_ip,
+                new_port,
+                conn_type_to_use,
+                channel_id,
+            )
+        except ValueError as exc:
+            raise ValidationError(_opcua_validation_message(exc)) from exc
+        current = (
+            await asyncio.to_thread(OpcUaDeviceConfigurationService.public, channel_id) if old_protocol == 7 else {}
+        )
+        requested = req.opcua_config.model_dump(
+            exclude={
+                "generate_certificate",
+                "certificate",
+                "private_key",
+                "peer_certificate",
+                "password",
+            }
+        )
+        config_changed = any(current.get(key) != value for key, value in requested.items())
+        config_changed = config_changed or bool(
+            opcua_prepared["secrets"] or req.opcua_config.certificate or req.opcua_config.peer_certificate
+        )
+        runtime_configuration_changed = runtime_configuration_changed or config_changed
+    if (
+        old_protocol == 7
+        and protocol_to_use == 7
+        and conn_type_to_use == 1
+        and (new_ip != existing.get("ip") or new_port != existing.get("port"))
+        and opcua_prepared is None
+    ):
+        raise ValidationError("OPC UA 客户端地址请通过完整 Endpoint URL 配置修改")
+    if protocol_to_use == 7 and opcua_prepared is None:
+        from src.data.service.opcua_config_service import OpcUaConfigService
+        from src.proto.opcua.core.transport import make_endpoint_url
+
+        try:
+            OpcUaConfigService.validate_channel_endpoint(channel_id, make_endpoint_url(new_ip, new_port))
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+    server_endpoint_changed = (
+        conn_type_to_use != existing.get("conn_type", 1)
+        or (new_ip or "").strip() != (existing.get("ip") or "").strip()
+        or str(new_port or "") != str(existing.get("port") or "")
+    )
+    if conn_type_to_use == 2 and server_endpoint_changed:
+        _validate_server_endpoint_unique(new_ip, new_port, exclude_channel_id=channel_id)
+
+    # 设备分组变更：group_id 存储在 Device 表，由 DeviceGroupService 统一更新。
+    # 注意：移动分组与下方通道更新不在同一事务，任一步失败都会留下部分更新，
+    # 因此移动失败时直接报错中断，避免通道已更新而分组未生效。
+    if "group_id" in req.model_fields_set and req.group_id != existing.get("group_id"):
+        if req.group_id is not None and not DeviceGroupService.get_group_by_id(req.group_id):
+            raise ValidationError(f"目标设备组 {req.group_id} 不存在")
+        device_id = existing.get("device_id")
+        if device_id is not None:
+            moved = await asyncio.to_thread(
+                DeviceGroupService.move_devices_to_group,
+                [device_id],
+                req.group_id,
+            )
+            if moved != 1:
+                raise OperationError("更新设备分组失败", data=False)
+
+    channel_updates = {
+        field: value
+        for field, value in requested_updates.items()
+        if (str(value) != str(existing.get(field)) if field == "rtu_addr" else value != existing.get(field))
+    }
+    success = True
+    if opcua_prepared is not None:
+        await asyncio.to_thread(
+            OpcUaDeviceConfigurationService.update,
+            channel_id,
+            conn_type_to_use,
+            opcua_prepared,
+            channel_updates,
+            normalized_params,
+            params.schema_version if params else 1,
+        )
+    elif channel_updates:
+        success = await asyncio.to_thread(
+            ChannelService.update_channel,
+            channel_id=channel_id,
+            **channel_updates,
+        )
+
+    if not success:
+        raise OperationError("更新通道失败", data=False)
+
+    protocol_params_changed = normalized_params is not None and normalized_params != existing_params
+    if opcua_prepared is None and (protocol_params_changed or protocol_combination_changed):
+        await asyncio.to_thread(
+            ChannelConfigurationService.save_protocol_params,
+            channel_id,
+            protocol_to_use,
+            conn_type_to_use,
+            normalized_params if params else None,
+            params.schema_version if params else 1,
+        )
+
+    try:
+        device_controller = request.app.state.device_controller
+        if runtime_configuration_changed and not req.defer_runtime_reload:
+            old_device = device_controller.get_device_by_id(channel_id)
+            was_running = bool(old_device and old_device.is_protocol_running())
+            await reload_device_instance(device_controller, channel_id, is_start=was_running)
+        elif "name" in channel_updates:
+            # A display-name-only edit does not require rebuilding the protocol stack.
+            device = device_controller.get_device_by_id(channel_id)
+            if device is not None:
+                old_keys = [key for key, value in device_controller.device_map.items() if value is device]
+                for key in old_keys:
+                    device_controller.device_map.pop(key, None)
+                device.name = req.name
+                device_controller.device_map[req.name] = device
+        if req.change_tracking_enabled is not None:
+            device = device_controller.get_device_by_id(channel_id)
+            if device is not None:
+                device.point_manager.set_change_tracking_enabled(req.change_tracking_enabled)
+    except Exception as e:
+        log.error(f"更新配置后同步运行时设备失败: {e}")
+        if protocol_to_use in (7, 8):
+            raise OperationError("协议配置已保存，但运行时重载失败，请检查配置后重试") from e
+    return BaseResponse(message="更新通道成功", data=True)
+
+
+def _opcua_validation_message(exc: ValueError) -> str:
+    # Pydantic's default exception text contains input values; never echo credentials.
+    from pydantic import ValidationError as PydanticValidationError
+
+    if isinstance(exc, PydanticValidationError):
+        return "; ".join(error["msg"] for error in exc.errors(include_input=False, include_context=False))
+    return str(exc)

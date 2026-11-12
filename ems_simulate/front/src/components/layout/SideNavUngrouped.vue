@@ -1,0 +1,801 @@
+<template>
+  <div
+    class="ungrouped-section"
+    :class="{ 'is-drop-target': isDropTarget }"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
+  >
+    <div class="ungrouped-header">
+      <div class="header-left" @click="$emit('toggle')">
+        <el-icon><ArrowRight :class="{ 'is-expanded': expanded }" /></el-icon>
+        <span>{{
+          $t("sidebar.ungroupedDevices", { count: ungroupedDevices.length })
+        }}</span>
+      </div>
+
+      <div class="header-actions" v-if="!isCollapse" @click.stop>
+        <el-dropdown
+          trigger="click"
+          @command="(cmd: string) => $emit('group-command', cmd)"
+        >
+          <el-button link size="small" :icon="MoreFilled" />
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="addDevice" :icon="Plus">{{
+                $t("sidebar.addDevice")
+              }}</el-dropdown-item>
+              <el-dropdown-item command="startAll" :icon="VideoPlay">{{
+                $t("sidebar.startAll")
+              }}</el-dropdown-item>
+              <el-dropdown-item command="stopAll" :icon="VideoPause">{{
+                $t("sidebar.stopAll")
+              }}</el-dropdown-item>
+              <el-dropdown-item
+                command="deleteAllDevices"
+                :icon="Delete"
+                divided
+                style="color: var(--el-color-danger)"
+                >{{ $t("sidebar.deleteAllDevices") }}</el-dropdown-item
+              >
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </div>
+    </div>
+    <div
+      v-if="ungroupedDevices.length"
+      v-show="expanded"
+      class="ungrouped-list"
+    >
+      <div
+        v-for="device in ungroupedDevices"
+        :key="device.id"
+        class="ungrouped-item-wrapper"
+      >
+        <div
+          class="ungrouped-item"
+          :class="{
+            'is-active':
+              currentDeviceName === device.name ||
+              selectedNodeKey === `device-${device.name}`,
+            'is-dragging': draggingId === device.id,
+          }"
+          draggable="true"
+          @dragstart="onDeviceDragStart($event, device)"
+          @dragend="onDragEnd"
+          @click="handleDeviceClick(device)"
+        >
+          <!-- IEC61850 展开箭头 -->
+          <el-icon
+            v-if="iec61850Map[device.name]"
+            class="expand-arrow"
+            :class="{ 'is-expanded': expandedIec61850[device.name] }"
+            @click.stop="toggleIec61850(device.name)"
+          >
+            <ArrowRight />
+          </el-icon>
+          <span v-else class="expand-arrow-placeholder" />
+          <el-tooltip
+            :content="device.name"
+            placement="right"
+            :disabled="!isCollapse"
+          >
+            <el-icon
+              v-if="iec61850Map[device.name]"
+              class="node-icon iec61850-icon"
+              ><Coin
+                v-if="
+                  iec61850Map[device.name]?.[0]?.isDlt645Child
+                " /><Connection v-else
+            /></el-icon>
+            <el-icon v-else class="node-icon"><Cpu /></el-icon>
+          </el-tooltip>
+          <span class="device-name">{{ device.name }}</span>
+          <div class="node-actions" v-if="!isCollapse" @click.stop>
+            <el-button
+              link
+              size="small"
+              :icon="Edit"
+              @click="$emit('edit-device', device.name)"
+            />
+            <el-button
+              link
+              size="small"
+              :icon="DocumentCopy"
+              @click="$emit('copy-device', device.name)"
+            />
+            <el-button
+              link
+              size="small"
+              :icon="Delete"
+              @click="$emit('delete-device', device.name)"
+            />
+          </div>
+        </div>
+
+        <!-- 协议子节点树：使用与分组设备相同的递归 el-tree，确保 DataSets 等深层结构一致 -->
+        <div
+          v-if="iec61850Map[device.name]"
+          v-show="expandedIec61850[device.name]"
+          class="iec61850-children"
+        >
+          <el-tree
+            :data="iec61850Map[device.name]"
+            :props="protocolTreeProps"
+            node-key="nodeKey"
+            :expand-on-click-node="true"
+            highlight-current
+            :current-node-key="selectedNodeKey"
+            class="ungrouped-protocol-tree"
+            @node-click="
+              (data: TreeNode) => handleProtocolNodeClick(device.name, data)
+            "
+          >
+            <template #default="{ data }">
+              <div
+                class="protocol-tree-node"
+                :class="{
+                  'is-group': data.isGroup,
+                  'is-iec61850-category': data.iec61850Level === 'category',
+                  'is-iec61850-ld': data.iec61850Level === 'ld',
+                  'is-iec61850-ln': data.iec61850Level === 'ln',
+                  'is-dlt645-category':
+                    data.isDlt645Child && data.dlt645Settlement === undefined,
+                  'is-dlt645-settlement':
+                    data.isDlt645Child && data.dlt645Settlement !== undefined,
+                }"
+              >
+                <el-icon class="protocol-node-icon">
+                  <Collection v-if="data.isDlt645Child && data.isGroup" />
+                  <Calendar v-else-if="data.isDlt645Child" />
+                  <component v-else :is="getIec61850NodeIcon(data)" />
+                </el-icon>
+                <span class="protocol-node-label">{{ data.label }}</span>
+              </div>
+            </template>
+          </el-tree>
+        </div>
+      </div>
+    </div>
+    <div v-else v-show="expanded" class="ungrouped-empty">
+      {{ $t("sidebar.ungroupedEmpty") }}
+    </div>
+  </div>
+</template>
+
+<script lang="ts" setup>
+import { ref, watch } from "vue";
+import { getIec61850NodeIcon } from "./iec61850NodeIcons";
+import {
+  readDragPayload,
+  setDragPayload,
+  clearDragPayload,
+  type DeviceDragPayload,
+} from "./deviceDrag";
+import {
+  ArrowRight,
+  Cpu,
+  Edit,
+  Delete,
+  MoreFilled,
+  Plus,
+  VideoPlay,
+  VideoPause,
+  DocumentCopy,
+  Connection,
+  Coin,
+  Collection,
+  Calendar,
+} from "@element-plus/icons-vue";
+
+interface TreeNode {
+  nodeKey: string;
+  label: string;
+  isGroup: boolean;
+  id: number;
+  isIec61850Child?: boolean;
+  isDlt645Child?: boolean;
+  dlt645Prefix?: number;
+  dlt645Settlement?: number;
+  iec61850Level?: "category" | "ld" | "ln";
+  name: string;
+  type?: string;
+  value?: string;
+  deviceName?: string;
+  children?: TreeNode[];
+}
+
+const props = defineProps<{
+  ungroupedDevices: any[];
+  iec61850Map: Record<string, TreeNode[]>;
+  expanded: boolean;
+  currentDeviceName: string;
+  isCollapse: boolean;
+  selectedNodeKey?: string;
+}>();
+
+const emit = defineEmits<{
+  (e: "toggle"): void;
+  (e: "device-click", device: any): void;
+  (e: "edit-device", name: string): void;
+  (e: "delete-device", name: string): void;
+  (e: "group-command", command: string): void;
+  (e: "copy-device", name: string): void;
+  (e: "node-click", data: any): void;
+  (e: "device-drop-ungrouped", deviceId: number): void;
+}>();
+
+// ========== 拖拽修改设备分组 ==========
+
+const draggingId = ref<number | null>(null);
+const isDropTarget = ref(false);
+
+const onDeviceDragStart = (event: DragEvent, device: any) => {
+  // 从操作按钮区域开始拖动时取消拖拽，避免与编辑/删除/复制按钮误触
+  const target = event.target as HTMLElement | null;
+  if (target?.closest(".node-actions")) {
+    event.preventDefault();
+    return;
+  }
+  setDragPayload(event, {
+    type: "device",
+    id: device.id,
+    name: device.name,
+    groupId: null,
+  });
+  draggingId.value = device.id;
+};
+
+/** 未分组区域仅接收仍处于分组中的设备（移出分组）；分组提升为顶层请拖到分组树顶部的顶层落点 */
+const canAccept = (payload: DeviceDragPayload) =>
+  payload.type === "device" && payload.groupId !== null;
+
+const onDragOver = (event: DragEvent) => {
+  const payload = readDragPayload(event);
+  if (!payload || !canAccept(payload)) return;
+  event.preventDefault();
+  event.dataTransfer!.dropEffect = "move";
+  isDropTarget.value = true;
+};
+
+const onDragLeave = (event: DragEvent) => {
+  const related = event.relatedTarget as Node | null;
+  if (
+    related &&
+    event.currentTarget instanceof Node &&
+    event.currentTarget.contains(related)
+  ) {
+    return;
+  }
+  isDropTarget.value = false;
+};
+
+const onDrop = (event: DragEvent) => {
+  const payload = readDragPayload(event);
+  if (!payload || !canAccept(payload)) return;
+  event.preventDefault();
+  clearDragPayload();
+  draggingId.value = null;
+  isDropTarget.value = false;
+  if (payload.type === "device") {
+    emit("device-drop-ungrouped", payload.id);
+  }
+};
+
+const onDragEnd = () => {
+  clearDragPayload();
+  draggingId.value = null;
+  isDropTarget.value = false;
+};
+
+// IEC61850 设备展开状态
+const expandedIec61850 = ref<Record<string, boolean>>({});
+const selectedNodeKey = ref<string>("");
+const protocolTreeProps = { children: "children", label: "label" };
+
+const toggleIec61850 = (deviceName: string) => {
+  expandedIec61850.value[deviceName] = !expandedIec61850.value[deviceName];
+  expandedIec61850.value = { ...expandedIec61850.value };
+};
+
+// 点击设备行：如果是 IEC61850 设备则展开/折叠树，同时选中设备
+const handleDeviceClick = (device: any) => {
+  selectedNodeKey.value = `device-${device.name}`;
+  if (props.iec61850Map[device.name]) {
+    toggleIec61850(device.name);
+  }
+  emit("device-click", device);
+};
+
+// 未分组设备与分组设备统一由 el-tree 递归处理任意深度子菜单。
+const handleProtocolNodeClick = (deviceName: string, node: TreeNode) => {
+  selectedNodeKey.value = node.nodeKey;
+  emit("node-click", {
+    ...node,
+    isIec61850Child: node.isIec61850Child === true,
+    deviceName: node.deviceName || deviceName,
+  });
+};
+
+// 当 iec61850Map 变化时，重置展开状态
+watch(
+  () => props.iec61850Map,
+  () => {
+    // 数据刷新时重置展开状态
+  },
+  { deep: true },
+);
+
+// 路由刷新时，同步 selectedNodeKey 以正确高亮当前设备
+watch(
+  () => props.currentDeviceName,
+  (name) => {
+    if (name) {
+      selectedNodeKey.value = `device-${name}`;
+    }
+  },
+  { immediate: true },
+);
+</script>
+
+<style lang="scss" scoped>
+.ungrouped-section {
+  margin: 20px 12px 10px;
+  border-top: 1px solid var(--sb-border);
+  padding-top: 20px;
+}
+
+/* ===== 拖拽修改设备分组 ===== */
+.ungrouped-item.is-dragging {
+  opacity: 0.4;
+}
+
+.ungrouped-section.is-drop-target {
+  outline: 2px dashed var(--color-primary);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+.ungrouped-empty {
+  padding: 16px 14px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+  border: 1px dashed var(--sb-border);
+  border-radius: 10px;
+}
+
+.ungrouped-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  color: var(--text-secondary);
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+.ungrouped-header:hover {
+  background-color: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  flex: 1;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 600;
+}
+
+.header-left .el-icon {
+  margin-right: 10px;
+  transition: transform 0.2s;
+}
+
+.header-left .el-icon.is-expanded {
+  transform: rotate(90deg);
+}
+
+.header-actions {
+  display: flex;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+.ungrouped-header:hover .header-actions {
+  opacity: 1;
+}
+
+.header-actions .el-button {
+  padding: 5px;
+  color: var(--text-secondary);
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+
+.header-actions .el-button:hover {
+  background-color: var(--item-active-bg);
+  color: var(--color-primary);
+}
+
+.ungrouped-list {
+  padding: 8px 0 0 10px;
+}
+
+.ungrouped-item-wrapper {
+  margin-bottom: 2px;
+}
+
+.ungrouped-item {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  padding: 10px 14px;
+  cursor: pointer;
+  border-radius: 10px;
+  transition: all 0.2s;
+  color: var(--text-secondary);
+}
+
+.ungrouped-item:hover {
+  background-color: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+.ungrouped-item.is-active {
+  background: var(--item-active-bg);
+  color: var(--color-primary);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--color-primary);
+}
+
+.ungrouped-item .node-icon {
+  margin-right: 12px;
+  font-size: 18px;
+  color: var(--text-secondary);
+}
+
+.ungrouped-item .iec61850-icon {
+  color: var(--color-primary);
+  cursor: pointer;
+}
+
+.ungrouped-item .device-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+}
+
+.node-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+.ungrouped-item:hover .node-actions {
+  opacity: 1;
+}
+
+.node-actions .el-button {
+  padding: 5px;
+  margin-left: 0;
+  color: var(--text-secondary);
+  border-radius: 6px;
+}
+
+.node-actions .el-button:hover {
+  background-color: var(--item-active-bg);
+  color: var(--color-primary);
+}
+
+/* 展开箭头 */
+.expand-arrow {
+  width: 16px;
+  height: 16px;
+  margin-right: 2px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.expand-arrow.is-expanded {
+  transform: rotate(90deg);
+}
+
+.expand-arrow-placeholder {
+  width: 16px;
+  margin-right: 2px;
+  flex-shrink: 0;
+}
+
+.expand-arrow-placeholder.small {
+  width: 12px;
+  margin-right: 1px;
+}
+
+.expand-arrow.small {
+  width: 12px;
+  height: 12px;
+  font-size: 10px;
+  margin-right: 1px;
+}
+
+/* IEC61850 子节点样式 */
+.iec61850-children {
+  padding: 4px 0 6px 24px;
+}
+
+/* 与分组设备的 SideNavTree 使用同一套递归树视觉层级。 */
+.ungrouped-protocol-tree {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.ungrouped-protocol-tree :deep(.el-tree-node) {
+  background-color: transparent !important;
+}
+
+.ungrouped-protocol-tree :deep(.el-tree-node__content) {
+  height: 32px;
+  margin-bottom: 2px;
+  padding-right: 8px;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  transition: all 0.2s ease;
+}
+
+.ungrouped-protocol-tree :deep(.el-tree-node__content:has(> .is-iec61850-ld)),
+.ungrouped-protocol-tree
+  :deep(.el-tree-node__content:has(> .is-dlt645-settlement)) {
+  height: 28px;
+  margin-bottom: 1px;
+  border-radius: 6px;
+}
+
+.ungrouped-protocol-tree :deep(.el-tree-node__content:has(> .is-iec61850-ln)) {
+  height: 26px;
+  margin-bottom: 1px;
+  border-radius: 5px;
+}
+
+.ungrouped-protocol-tree
+  :deep(.el-tree-node.is-current > .el-tree-node__content) {
+  background: var(--item-active-bg) !important;
+  color: var(--color-primary) !important;
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--color-primary);
+}
+
+.protocol-tree-node {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding-left: 4px;
+}
+
+.protocol-tree-node.is-group {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.protocol-node-icon {
+  flex: none;
+  margin-right: 10px;
+  font-size: 16px;
+  color: var(--color-primary);
+}
+
+.protocol-node-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+
+.protocol-tree-node.is-iec61850-ld .protocol-node-icon,
+.protocol-tree-node.is-dlt645-settlement .protocol-node-icon {
+  margin-right: 8px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.protocol-tree-node.is-iec61850-ld .protocol-node-label,
+.protocol-tree-node.is-dlt645-settlement .protocol-node-label {
+  font-size: 12px;
+}
+
+.protocol-tree-node.is-iec61850-ln .protocol-node-icon {
+  margin-right: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.protocol-tree-node.is-iec61850-ln .protocol-node-label {
+  font-size: 11.5px;
+}
+
+.iec61850-child-item {
+  border-radius: 8px;
+  transition: all 0.15s;
+}
+
+.iec61850-child-item.is-group {
+  font-weight: 500;
+}
+
+.child-row {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: all 0.15s;
+  color: var(--text-secondary);
+}
+
+.child-row:hover {
+  background-color: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+.child-row.is-selected {
+  background: var(--item-active-bg);
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+.child-icon {
+  margin-right: 10px;
+  font-size: 16px;
+  color: var(--color-primary);
+}
+
+.iec61850-child-item:not(.is-group) .child-icon {
+  color: var(--text-secondary);
+}
+
+.child-label {
+  font-size: 12.5px;
+}
+
+/* IEC61850 子项 */
+.iec61850-sub-children {
+  padding: 2px 0 4px 20px;
+}
+
+.iec61850-sub-item {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all 0.15s;
+}
+
+.iec61850-sub-item:hover {
+  background-color: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+.iec61850-sub-item.is-selected {
+  background: var(--item-active-bg);
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+.sub-icon {
+  margin-right: 8px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.sub-label {
+  font-size: 12px;
+}
+
+/* LD 下的 LN 子节点 (第三层) */
+.iec61850-ln-children {
+  padding: 2px 0 4px 16px;
+}
+
+.iec61850-ln-item {
+  display: flex;
+  align-items: center;
+  padding: 3px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all 0.15s;
+}
+
+.iec61850-ln-item:hover {
+  background-color: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+.iec61850-ln-item.is-selected {
+  background: var(--item-active-bg);
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+.ln-icon {
+  margin-right: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ln-label {
+  font-size: 11.5px;
+}
+
+/* LN 行（可展开/折叠） */
+.iec61850-ln-row {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  padding: 3px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.iec61850-ln-row:hover {
+  background-color: var(--item-hover-bg);
+}
+
+/* LN 下的数据集子节点 (第四层) */
+.iec61850-ds-children {
+  padding: 2px 0 4px 14px;
+}
+
+.iec61850-ds-item {
+  display: flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all 0.15s;
+}
+
+.iec61850-ds-item:hover {
+  background-color: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+.iec61850-ds-item.is-selected {
+  background: var(--item-active-bg);
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+.ds-icon {
+  margin-right: 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.ds-label {
+  font-size: 11px;
+}
+</style>

@@ -1,0 +1,1663 @@
+"""
+IEC 61850 MMS 服务端封装 (门面模式)
+
+组合 IedModelBuilder 和 ServerDataSetManager，
+提供统一的服务端 API。保持与原有 IEC61850Server 接口完全向后兼容。
+"""
+
+import contextlib
+import os
+import queue
+import threading
+from typing import Any
+
+from .defs import (
+    HAS_IEC61850,
+)
+from .log import log
+from .plugins.datamodels.builder import IedModelBuilder
+from .plugins.datasets.server import ServerDataSetManager
+from .plugins.files.server import ServerFileService
+from .plugins.log_plugin.server import ServerLogManager
+from .plugins.reports.manager import ReportManager
+from .plugins.setting_groups.server import ServerSettingGroupsManager
+
+if HAS_IEC61850:
+    from pyiec61850 import pyiec61850 as iec61850
+
+
+class IEC61850Server:
+    """IEC 61850 MMS 服务端 (门面模式)
+
+    组合 IedModelBuilder 和 ServerDataSetManager，
+    提供统一的服务端 API。保持与原有接口完全向后兼容。
+    """
+
+    def __init__(
+        self,
+        ip: str = "0.0.0.0",
+        port: int = 102,
+        model_name: str = "EMS",
+        ied_name: str = "EMSDevice",
+        ld_name: str = "GenericLD",
+        max_connections: int = 5,
+        authentication_enabled: bool = False,
+        authentication_password: str = "",
+        file_service_directory: str | None = None,
+        tls_configuration=None,
+    ):
+        """保存服务端网络与模型配置，并初始化逻辑节点、测点、数据集和 GOOSE 索引。"""
+        if not HAS_IEC61850:
+            raise RuntimeError("pyiec61850 未安装，无法创建 IEC 61850 服务器")
+
+        self.ip = ip
+        self.port = port
+        self.model_name = model_name
+        self.ied_name = ied_name
+        self.ld_name = ld_name
+        self.max_connections = max_connections
+        self.authentication_enabled = authentication_enabled
+        self.authentication_password = authentication_password
+        self.tls_configuration = tls_configuration
+
+        selected_file_directory = (file_service_directory or "").strip()
+        self._files = ServerFileService(selected_file_directory) if selected_file_directory else None
+
+        # ===== 组合核心组件 =====
+        self._builder = IedModelBuilder(model_name, ied_name, ld_name)
+        self.model_name = self._builder.model_name  # 同步
+        self._ds_manager = ServerDataSetManager(self._builder, self.model_name)
+        self._report_manager = ReportManager(self._builder, self.model_name)
+        self._setting_group_manager = ServerSettingGroupsManager(self)
+        self._log_manager = ServerLogManager(self)
+
+        self._server = None
+        self._is_running = False
+        # dU 描述存储: {do_key: desc}，set_du_descriptions 存储，start() 时自动应用
+        self._du_descriptions: dict[str, str] = {}
+        # 整改 v2.0: 模型加载状态
+        self._model_loaded = False
+        self._loaded_icd_path: str = ""
+        self._last_import_result = None
+        self.scl_model = None
+        self._loaded_ied_ld_insts: set[str] = set()
+        self._password_authenticator = None
+        self._connection_callback = None
+        self._native_connection_handler = None
+        # 连接指示回调只做最小记录（入队），实际的连接监控记录放到独立工作线程，
+        # 避免回调在原生 C/SWIG 线程里执行重活而阻塞关联建立（同进程客户端持 GIL 时会被拒）。
+        self._event_queue: queue.Queue = queue.Queue()
+        self._event_worker: threading.Thread | None = None
+        self._event_worker_stop = threading.Event()
+
+        if self.authentication_enabled:
+            from .server_auth import Iec61850ServerPasswordAuthenticator
+
+            self._password_authenticator = Iec61850ServerPasswordAuthenticator(self.authentication_password)
+
+    # ===== 向后兼容属性: 委托给 builder =====
+
+    @property
+    def _model(self):
+        """返回IEC 61850 服务端当前的模型。"""
+        return self._builder.model
+
+    @property
+    def _ld(self):
+        """返回IEC 61850 服务端当前的逻辑设备。"""
+        return self._builder._ld
+
+    @_ld.setter
+    def _ld(self, value):
+        """更新IEC 61850 服务端的逻辑设备，使后续操作使用新值。"""
+        self._builder._ld = value
+
+    @property
+    def _lln0(self):
+        """返回IEC 61850 服务端当前的LLN0。"""
+        return self._builder._lln0
+
+    @_lln0.setter
+    def _lln0(self, value):
+        """更新IEC 61850 服务端的LLN0，使后续操作使用新值。"""
+        self._builder._lln0 = value
+
+    @property
+    def _mmxu(self):
+        """返回IEC 61850 服务端当前的MMXU 逻辑节点。"""
+        return self._builder._mmxu
+
+    @property
+    def _ggio1(self):
+        """返回IEC 61850 服务端当前的GGIO1。"""
+        return self._builder._ggio1
+
+    @property
+    def _ggio2(self):
+        """返回IEC 61850 服务端当前的GGIO2。"""
+        return self._builder._ggio2
+
+    @property
+    def _ld_map(self) -> dict[str, Any]:
+        """返回IEC 61850 服务端当前的逻辑设备映射。"""
+        return self._builder.ld_map
+
+    @property
+    def _ln_map(self) -> dict[str, Any]:
+        """返回IEC 61850 服务端当前的逻辑节点映射。"""
+        return self._builder.ln_map
+
+    @property
+    def _do_map(self) -> dict[str, Any]:
+        """返回IEC 61850 服务端当前的数据对象映射。"""
+        return self._builder._do_map
+
+    @property
+    def _da_map(self) -> dict[str, Any]:
+        """返回IEC 61850 服务端当前的数据属性映射。"""
+        return self._builder._da_map
+
+    @property
+    def _point_refs(self) -> dict[str, str]:
+        """返回IEC 61850 服务端当前的测点引用。"""
+        return self._builder.point_refs
+
+    @property
+    def _point_attrs(self) -> dict[str, Any]:
+        """返回IEC 61850 服务端当前的测点属性。"""
+        return self._builder.point_attrs
+
+    @property
+    def _point_fc(self) -> dict[str, str]:
+        """返回IEC 61850 服务端当前的测点功能约束。"""
+        return self._builder.point_fc
+
+    @property
+    def _point_iec_type(self) -> dict[str, str]:
+        """返回IEC 61850 服务端当前的测点IEC 类型类型。"""
+        return self._builder.point_iec_type
+
+    @property
+    def _point_mms_type(self) -> dict[str, str]:
+        """返回IEC 61850 服务端当前的测点MMS 类型类型。"""
+        return self._builder.point_mms_type
+
+    @property
+    def _standard_bda_list(self) -> list[tuple]:
+        """返回IEC 61850 服务端当前的标准基础数据属性列表。"""
+        return self._builder.standard_bda_list
+
+    @property
+    def _keep_alive(self) -> list[Any]:
+        """返回IEC 61850 服务端当前的保活对象。"""
+        return self._builder.keep_alive
+
+    def _create_ied_server(self):
+        """根据当前数据模型创建底层 IedServer，并应用报告、GOOSE 与网络配置。"""
+        server_config = iec61850.IedServerConfig_create()
+        try:
+            iec61850.IedServerConfig_setMaxMmsConnections(server_config, self.max_connections)
+            enable_edit_sg = getattr(iec61850, "IedServerConfig_enableEditSG", None)
+            if enable_edit_sg is not None:
+                enable_edit_sg(server_config, True)
+            enable_log_service = getattr(iec61850, "IedServerConfig_enableLogService", None)
+            if enable_log_service is not None:
+                enable_log_service(server_config, True)
+            if getattr(self, "_files", None) is not None:
+                self._configure_file_service_config(server_config)
+            if getattr(self, "tls_configuration", None) is None:
+                # The 1.6.1.8 wrapper rejects a null TLSConfiguration in
+                # IedServer_createWithConfig, so plain MMS keeps its native
+                # non-TLS creator.
+                server = iec61850.IedServer_create(self._builder.model)
+            else:
+                server = iec61850.IedServer_createWithConfig(
+                    self._builder.model,
+                    self.tls_configuration.native,
+                    server_config,
+                )
+            if getattr(self, "_files", None) is not None:
+                self._configure_file_service_server(server)
+            self._install_connection_handler(server)
+            return server
+        finally:
+            iec61850.IedServerConfig_destroy(server_config)
+
+    def set_connection_callback(self, callback) -> None:
+        """Register callback(connection_key, connected, peer, local)."""
+        self._connection_callback = callback
+
+    def _install_connection_handler(self, server) -> None:
+        """Install the binding callback, falling back to the native C ABI."""
+        setter = getattr(iec61850, "IedServer_setConnectionIndicationHandler", None)
+        if setter is None:
+            return
+        # 先启动连接事件工作线程，确保回调一旦触发就能异步消费，不阻塞原生线程。
+        self._start_connection_event_worker()
+        self._native_connection_handler = self._handle_connection_indication
+        try:
+            setter(server, self._native_connection_handler, None)
+            return
+        except TypeError:
+            # 已实测：本版 pyiec61850 的 IedServer_setConnectionIndicationHandler 不接受
+            # Python 回调（抛 TypeError），而 ctypes 兜底安装会导致 libiec61850 拒绝客户端
+            # 关联（同进程客户端持 GIL 时回调无法执行 → 关联被拒，参见 CONNECTION_REJECTED=5）。
+            # 为保证连接可用，SWIG 无法安装时不再回退到 ctypes。
+            log.warning(
+                "IEC61850 连接监控回调无法通过 SWIG 安装，跳过连接指示监控（避免 ctypes 安装导致客户端关联被拒绝）"
+            )
+            return
+
+    @staticmethod
+    def _connection_key(connection) -> str:
+        native = getattr(connection, "this", connection)
+        try:
+            return f"mms:{int(native)}"
+        except (TypeError, ValueError):
+            return f"mms:{native!s}"
+
+    def _handle_connection_indication(self, server, connection, connected, parameter) -> None:
+        del server, parameter
+        try:
+            peer = iec61850.ClientConnection_getPeerAddress(connection)
+            local = iec61850.ClientConnection_getLocalAddress(connection)
+            self._emit_connection_indication(self._connection_key(connection), bool(connected), peer, local)
+        except Exception as exc:
+            # 连接指示回调运行在原生 C/SWIG 回调中：任何异常一旦泄漏到原生层，
+            # 都会破坏连接的建立/关闭，导致客户端被拒绝（如 IED_ERROR_CONNECTION_REJECTED）
+            # 或连接被异常断开。此处必须捕获并记录，绝不能让异常穿透原生回调。
+            log.error(f"MMS 连接指示回调处理失败: {exc}", exc_info=True)
+
+    def _emit_connection_indication(self, key: str, connected: bool, peer, local) -> None:
+        """最小化连接指示回调：仅将事件入队，真正的监控记录由工作线程完成。
+
+        回调运行在原生 C/SWIG 线程上；若在这里直接执行 connection_callback
+        （其会做 registry 写入等较重的 Python 工作），在与同进程客户端争用 GIL 时
+        会阻塞关联建立，导致客户端被拒绝。入队后立即返回，避免阻塞。
+        """
+        self._event_queue.put((key, bool(connected), peer, local))
+
+    def _start_connection_event_worker(self) -> None:
+        """启动（幂等）消费连接事件的工作线程。"""
+        if self._event_worker is not None and self._event_worker.is_alive():
+            return
+        self._event_worker_stop.clear()
+        self._event_worker = threading.Thread(
+            target=self._connection_event_worker,
+            name="iec61850-conn-monitor",
+            daemon=True,
+        )
+        self._event_worker.start()
+
+    def _stop_connection_event_worker(self) -> None:
+        """停止连接事件工作线程（发送哨兵并等待线程退出）。"""
+        if self._event_worker is None:
+            return
+        self._event_worker_stop.set()
+        self._event_queue.put(None)
+        worker = self._event_worker
+        self._event_worker = None
+        worker.join(timeout=2)
+
+    def _connection_event_worker(self) -> None:
+        """消费连接事件并调用注册的 connection_callback，完成监控记录。"""
+        while not self._event_worker_stop.is_set():
+            try:
+                item = self._event_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                self._event_queue.task_done()
+                break
+            key, connected, peer, local = item
+            try:
+                if self._connection_callback:
+                    self._connection_callback(key, connected, peer, local)
+            except Exception as exc:
+                log.error(f"处理连接监控事件失败: {exc}", exc_info=True)
+            finally:
+                self._event_queue.task_done()
+
+    def get_connection_count(self) -> int:
+        """返回当前打开的客户端连接数（轮询自原生 IedServer，不依赖连接指示回调）。
+
+        连接指示回调（ctypes）会因同进程客户端持 GIL 而导致关联被拒，因此改为
+        直接读取 IedServer_getNumberOfOpenConnections 轮询计数；只能提供连接数，
+        无法枚举每一连接的 IP/端口详情。
+        """
+        if not self._server or not self._is_running:
+            return 0
+        try:
+            getter = getattr(iec61850, "IedServer_getNumberOfOpenConnections", None)
+            if getter is None:
+                return 0
+            return int(getter(self._server) or 0)
+        except Exception:
+            return 0
+
+    def _configure_file_service_config(self, server_config) -> None:
+        """Enable MMS file services in bindings that expose config-level APIs."""
+        enable = getattr(iec61850, "IedServerConfig_enableFileService", None)
+        set_base_path = getattr(iec61850, "IedServerConfig_setFileServiceBasePath", None)
+        if enable is not None:
+            enable(server_config, True)
+        if set_base_path is not None:
+            set_base_path(server_config, self._native_file_service_path())
+
+    def _configure_file_service_server(self, server) -> None:
+        """Set the filestore on old and new libIEC61850 server bindings."""
+        if server is None:
+            return
+        set_base_path = getattr(iec61850, "IedServer_setFilestoreBasepath", None)
+        if set_base_path is not None:
+            set_base_path(server, self._native_file_service_path())
+
+    def _native_file_service_path(self) -> str:
+        """Return an absolute native path with the separator expected by libIEC61850."""
+        if self._files is None:
+            raise RuntimeError("IEC61850 文件服务未启用")
+        return str(self._files.base_directory) + os.sep
+
+    @property
+    def files(self) -> ServerFileService | None:
+        """Return the local file store exported to MMS clients."""
+        return self._files
+
+    def _configure_authentication(self) -> None:
+        """Install password validation before accepting MMS associations."""
+        if self._password_authenticator is not None:
+            self._password_authenticator.install(self._server)
+
+    # ===== 向后兼容属性: 委托给 ds_manager =====
+
+    @property
+    def _goose_interface(self) -> str:
+        """返回IEC 61850 服务端当前的GOOSE网络接口。"""
+        return self._ds_manager.goose_interface
+
+    @_goose_interface.setter
+    def _goose_interface(self, value):
+        """更新IEC 61850 服务端的GOOSE网络接口，使后续操作使用新值。"""
+        self._ds_manager.goose_interface = value
+
+    @property
+    def _goose_publishing_enabled(self) -> bool:
+        """返回IEC 61850 服务端当前的GOOSE发布启用状态。"""
+        return self._ds_manager.goose_publishing_enabled
+
+    @property
+    def _goose_cb_list(self) -> list[dict[str, Any]]:
+        """返回IEC 61850 服务端当前的GOOSE控制块列表。"""
+        return self._ds_manager.goose_cb_list
+
+    @property
+    def _dataset_catalog(self) -> list[dict[str, Any]]:
+        """返回IEC 61850 服务端当前的数据集目录。"""
+        return self._ds_manager.dataset_catalog
+
+    @property
+    def _model_changed(self) -> bool:
+        """返回IEC 61850 服务端当前的模型变更标志。"""
+        return self._ds_manager.model_changed
+
+    @_model_changed.setter
+    def _model_changed(self, value):
+        """更新IEC 61850 服务端的模型变更标志，使后续操作使用新值。"""
+        self._ds_manager.model_changed = value
+
+    @property
+    def _pending_goose_registrations(self) -> list[dict[str, Any]]:
+        """返回IEC 61850 服务端当前的待处理GOOSE注册项。"""
+        return self._ds_manager.pending_registrations
+
+    # ===== 模型构建 (委托给 IedModelBuilder) =====
+
+    def _build_base_model(self):
+        """构建基础 IED 模型 (已在 builder __init__ 中完成)"""
+        pass  # builder.__init__ 已创建 IedModel
+
+    def _ensure_base_ld(self):
+        """懒创建默认 LD (委托给 builder)"""
+        self._builder.ensure_base_ld()
+
+    def _get_or_create_ld(self, ld_inst: str):
+        """获取或创建逻辑设备 (委托给 builder)"""
+        return self._builder.get_or_create_ld(ld_inst)
+
+    def _get_or_create_ln(self, ld_inst: str, ln_name: str):
+        """获取或创建逻辑节点 (委托给 builder)"""
+        return self._builder.get_or_create_ln(ld_inst, ln_name)
+
+    def add_point(
+        self,
+        address,
+        frame_type: int = 0,
+        fc: str = "",
+        dchg: bool = False,
+        qchg: bool = False,
+        dupd: bool = False,
+    ) -> str | None:
+        """添加测点到数据模型 (委托给 builder)"""
+        return self._builder.add_point(address, frame_type, fc, dchg=dchg, qchg=qchg, dupd=dupd)
+
+    def _add_point_simple(self, address, frame_type: int) -> str | None:
+        """简单地址模式添加测点 (委托给 builder)"""
+        return self._builder._add_point_simple(address, frame_type)
+
+    def _add_point_from_ref(
+        self,
+        address: str,
+        frame_type: int,
+        fc: str = "",
+        *,
+        dchg: bool = False,
+        qchg: bool = False,
+        dupd: bool = False,
+    ) -> str | None:
+        """完整引用路径模式添加测点 (委托给 builder)"""
+        return self._builder._add_point_from_ref(
+            address,
+            frame_type,
+            fc,
+            dchg=dchg,
+            qchg=qchg,
+            dupd=dupd,
+        )
+
+    # ===== FC/IEC type 推断 (委托给 builder) =====
+
+    @staticmethod
+    def _infer_fc(frame_type: int, top_da: str) -> str:
+        """推断功能约束并返回推断结果。"""
+        return IedModelBuilder._infer_fc(frame_type, top_da)
+
+    @staticmethod
+    def _resolve_fc_const(fc: str):
+        """解析功能约束const并返回规范值。"""
+        return IedModelBuilder._resolve_fc_const(fc)
+
+    @staticmethod
+    def _infer_iec_type(frame_type: int, da_parts: list) -> int:
+        """推断IEC 类型类型并返回推断结果。"""
+        return IedModelBuilder._infer_iec_type(frame_type, da_parts)
+
+    @staticmethod
+    def _infer_iec_type_str(da_parts: list) -> str:
+        """推断IEC 类型类型STR并返回推断结果。"""
+        return IedModelBuilder._infer_iec_type_str(da_parts)
+
+    @staticmethod
+    def _infer_iec_type_from_str(iec_type: str, da_parts: list) -> int:
+        """把配置中的类型文本规范化为项目内部 IEC 数据类型。"""
+        return IedModelBuilder._infer_iec_type_from_str(iec_type, da_parts)
+
+    def _add_standard_das(self, do_obj, do_key: str, fc: str, frame_type: int, da_parts: list) -> None:
+        """为 DO 补充标准 DA (委托给 builder)"""
+        self._builder._add_standard_das(do_obj, do_key, fc, frame_type, da_parts)
+
+    def _ensure_fcda_model_nodes(self, ld_inst: str, ln_name: str, do_da_path: str, fc: str, iec_type: str) -> None:
+        """确保 FCDA 模型节点 (委托给 builder)"""
+        self._builder.ensure_fcda_model_nodes(ld_inst, ln_name, do_da_path, fc, iec_type)
+
+    # ===== DA 解析 (委托给 builder) =====
+
+    def _resolve_da(self, address: str):
+        """根据地址解析 DataAttribute (委托给 builder)"""
+        return self._builder.resolve_da(address)
+
+    # ===== 服务器生命周期 =====
+
+    def _init_standard_bda_defaults(self):
+        """初始化标准 DA 的默认值"""
+        if not self._server or not self._is_running:
+            return
+        import time as time_module
+
+        now_ms = int(time_module.time() * 1000)
+        for da, name, iec_type in self._builder.standard_bda_list:
+            try:
+                if iec_type == "quality":
+                    iec61850.IedServer_updateQuality(self._server, da, 0)
+                elif iec_type == "timestamp":
+                    iec61850.IedServer_updateUTCTimeAttributeValue(self._server, da, now_ms)
+                elif iec_type == "string":
+                    iec61850.IedServer_updateVisibleStringAttributeValue(self._server, da, "")
+            except Exception as e:
+                log.warning(f"初始化标准 DA 默认值失败: {name}({iec_type}), error={e}")
+
+    def _apply_pending_registrations(self):
+        """处理待注册的 GoCB/DataSet 队列 (委托给 ds_manager)"""
+        self._ds_manager.apply_pending_registrations(self.add_goose_control_block, self.register_dataset)
+
+    def reset_model(self):
+        """重置数据模型，清除所有已注册的 LD/LN/DO/DA
+
+        用于 ICD 导入场景：清理之前 start() 创建的默认 GenericLD，
+        确保模型只包含 ICD 文件中的自定义 LD。
+        导入 ICD 后必须重新注册所有 DataSet 和 RCB 才能生效。
+
+        注意：此操作会丢失所有已注册的测点（add_point 添加的），
+        调用前应确保测点已在 ICD 导入流程中重新注册。
+        """
+        self._builder = IedModelBuilder(self.model_name, self.ied_name, self.ld_name)
+        self._ds_manager = ServerDataSetManager(self._builder, self.model_name)
+        self._report_manager = ReportManager(self._builder, self.model_name)
+        self._setting_group_manager = ServerSettingGroupsManager(self)
+        self._log_manager = ServerLogManager(self)
+        self._model_changed = True
+        self._model_loaded = False
+        self._loaded_icd_path = ""
+        self._last_import_result = None
+        self.scl_model = None
+        self._loaded_ied_ld_insts.clear()
+        # dU values belong to the old model instance. Keeping this mapping
+        # across imports can apply stale descriptions to same-named DOs in the
+        # newly imported SCL model.
+        self._du_descriptions.clear()
+        log.info("数据模型已重置，默认 GenericLD 已清除")
+
+    # ===== 整改 v2.0: 模型加载与设备启动分离 =====
+
+    def load_model(self, icd_path: str, scl_result: Any = None) -> bool:
+        """从 ICD 文件加载模型（不启动 MMS 服务）
+
+        将 ICD 文件解析并构建完整 IedModel，
+        注册 GOOSE/DataSet/RCB 配置，
+        但不创建 IedServer 实例（不占用端口）。
+
+        Args:
+            icd_path: ICD 文件路径
+            scl_result: 可选，预先解析的 SclImportResult。提供时跳过内部解析步骤。
+
+        Returns:
+            是否加载成功
+        """
+        from .plugins.scl.service.import_service import SclImportService
+
+        log.info(f"正在从 ICD 文件加载模型: {icd_path}")
+
+        # 1. 解析 ICD 文件（复用外部传入的结果，避免重复解析）
+        if scl_result is not None:
+            result = scl_result
+        else:
+            service = SclImportService()
+            result = service.import_file(icd_path)
+        if not result.is_valid:
+            log.error(f"ICD 文件校验失败: {icd_path}, 错误数: {result.validation.error_count}")
+            return False
+
+        # 2. 重置现有模型
+        self.reset_model()
+
+        # 3. 从解析结果构建模型节点
+        ied_name = result.ied_name or self.ied_name
+        self.ied_name = ied_name
+        self.model_name = ied_name
+
+        # An SCD/CID may contain multiple IEDs. One IEC61850Server instance
+        # represents exactly one IED; mixing foreign LDs into this native
+        # IedModel creates invalid MMS domains and can crash libiec61850 while
+        # a client enumerates variable specifications.
+        selected_ld_insts: set[str] = set()
+        for doc_ied in getattr(result.doc, "ieds", []):
+            if doc_ied.name != ied_name:
+                continue
+            for access_point in doc_ied.access_points:
+                if access_point.server:
+                    selected_ld_insts.update(ld.inst for ld in access_point.server.ldevices)
+        self._loaded_ied_ld_insts = selected_ld_insts
+
+        def _point_belongs_to_loaded_ied(point: Any) -> bool:
+            """判断测点地址是否属于当前已加载的 IED 与逻辑设备范围。"""
+            ld_inst = point.reg_addr.split("/", 1)[0]
+            return not selected_ld_insts or ld_inst in selected_ld_insts
+
+        loaded_points = [
+            point
+            for point in (
+                result.points.yc_points + result.points.yx_points + result.points.yk_points + result.points.yt_points
+            )
+            if _point_belongs_to_loaded_ied(point)
+        ]
+        loaded_gse_controls = [
+            gse for gse in result.goose.gse_controls if not selected_ld_insts or gse.ld_inst in selected_ld_insts
+        ]
+        loaded_pure_datasets = [
+            dataset
+            for dataset in result.goose.pure_datasets
+            if not selected_ld_insts or dataset.get("ld_inst", "") in selected_ld_insts
+        ]
+        loaded_report_controls = [
+            report
+            for report in result.reports.report_controls
+            if not selected_ld_insts or report.ld_inst in selected_ld_insts
+        ]
+
+        # 先按 SCL 层级创建全部 LD/LN。控制块可能位于没有业务测点的
+        # LLN0 中，不能再依赖 point 列表间接创建父节点。
+        seen_lds: set[str] = set()
+        for doc_ied in getattr(result.doc, "ieds", []):
+            if doc_ied.name != ied_name:
+                continue
+            for access_point in doc_ied.access_points:
+                if not access_point.server:
+                    continue
+                for ld in access_point.server.ldevices:
+                    seen_lds.add(ld.inst)
+                    self._get_or_create_ld(ld.inst)
+                    for ln in ([ld.ln0] + ld.lns) if ld.ln0 else ld.lns:
+                        self._get_or_create_ln(ld.inst, ln.ln_name)
+
+        # 兼容非标准导入结果：为测点中出现但 SCL 层级未声明的 LD/LN 补建节点。
+        for point in loaded_points:
+            address = point.reg_addr
+            if "/" not in address:
+                continue
+            ld_inst = address.split("/")[0]
+            if ld_inst not in seen_lds:
+                seen_lds.add(ld_inst)
+                self._get_or_create_ld(ld_inst)
+                log.debug(f"创建逻辑设备: {ld_inst}")
+
+            # 解析 LN/DO/DA
+            rest = address[address.index("/") + 1 :]
+            if "." not in rest:
+                continue
+            ln_name = rest[: rest.index(".")]
+            self._get_or_create_ln(ld_inst, ln_name)
+
+        # 将 ICD 中的测点注册到数据模型（DO/DA 节点）
+        # Business points intentionally exclude intrinsic metadata such as q/t,
+        # but the native MMS model must still contain every SCL-declared leaf.
+        from .plugins.scl.transformer.server_model_builder import SclServerModelBuilder
+
+        self.scl_model = SclServerModelBuilder(result.doc).build(host=self.ip, port=self.port, ied_name=ied_name)
+        native_attribute_count = 0
+        for attribute in SclServerModelBuilder(result.doc).iter_leaf_attributes(ied_name):
+            if self._builder._add_point_from_ref(
+                attribute["ref"],
+                attribute["frame_type"],
+                attribute["fc"],
+                iec_type_name=attribute["iec_type"],
+                mms_type=attribute["mms_type"],
+                dchg=attribute["dchg"],
+                qchg=attribute["qchg"],
+                dupd=attribute["dupd"],
+            ):
+                native_attribute_count += 1
+        log.info(f"已注册 {native_attribute_count} 个 SCL 固有 DA/BDA 到原生 MMS 模型")
+
+        # dU is instance data and has to be restored after IedServer starts.
+        # Keep this in the model-loading path (rather than only in the upload
+        # API), so device reload/start and direct load_model() callers behave
+        # exactly like a fresh ICD import.
+        loaded_du_descriptions: dict[str, str] = {}
+        for point in loaded_points:
+            if not point.name or not point.reg_addr:
+                continue
+            do_ref = ".".join(point.reg_addr.split(".")[:2])
+            if f"{do_ref}.dU" in self._builder._da_map:
+                loaded_du_descriptions.setdefault(do_ref, point.name)
+        self._du_descriptions = loaded_du_descriptions
+        log.info(f"已从 SCL 模型加载 {len(self._du_descriptions)} 个实例 dU 描述值")
+
+        registered_count = 0
+
+        def _register_point(point, frame_type: int, default_fc: str) -> bool:
+            """把服务端测点引用、功能约束和类型信息登记到运行时索引。"""
+            return bool(
+                self._builder._add_point_from_ref(
+                    point.reg_addr,
+                    frame_type,
+                    getattr(point, "fc", "") or default_fc,
+                    iec_type_name=getattr(point, "iec_type", ""),
+                    mms_type=getattr(point, "mms_type", ""),
+                    dchg=bool(getattr(point, "dchg", False)),
+                    qchg=bool(getattr(point, "qchg", False)),
+                    dupd=bool(getattr(point, "dupd", False)),
+                )
+            )
+
+        for point in result.points.yc_points:
+            if not _point_belongs_to_loaded_ied(point):
+                continue
+            if _register_point(point, 0, "MX"):
+                registered_count += 1
+        for point in result.points.yx_points:
+            if not _point_belongs_to_loaded_ied(point):
+                continue
+            if _register_point(point, 1, "ST"):
+                registered_count += 1
+        for point in result.points.yk_points:
+            if not _point_belongs_to_loaded_ied(point):
+                continue
+            if _register_point(point, 2, "CO"):
+                registered_count += 1
+        for point in result.points.yt_points:
+            if not _point_belongs_to_loaded_ied(point):
+                continue
+            if _register_point(point, 3, "CO"):
+                registered_count += 1
+        log.info(f"已注册 {registered_count} 个测点到数据模型")
+
+        # 4. 注册 DataSet + GOOSE 发布配置
+        # 4a. 注册所有 DataSet（必须早于 GoCB，标准顺序：DataSet → GSEControlBlock）
+        seen_ds_refs: set[str] = set()
+
+        def _fcda_to_entry(member: dict) -> dict:
+            """将 FCDA member dict 转换为 register_dataset 所需的 entry 格式"""
+            member_ref = member.get("fcda_ref", member.get("name", ""))
+            member_fc = member.get("fc", "MX")
+            member_iec_type = member.get("iec_type", "")
+
+            # An FCDA can reference an entire structured DO with daName
+            # omitted. Resolve that reference to the matching FC leaf in the
+            # dynamic model. Leaving the native DataSetEntry component empty
+            # for this shape produces an invalid reference in libiec61850.
+            path_after_ln = member_ref.split("/", 1)[-1]
+            if path_after_ln.count(".") == 1:
+                prefix = f"{member_ref}."
+                candidates = [
+                    point
+                    for point in loaded_points
+                    if point.reg_addr.startswith(prefix) and (not member_fc or point.fc == member_fc)
+                ]
+                if candidates:
+                    member_ref = candidates[0].reg_addr
+                    member_iec_type = candidates[0].iec_type
+            return {"name": member_ref, "fc": member_fc, "iec_type": member_iec_type}
+
+        # 纯 DataSet（未被 GOOSE/Report 引用）
+        for pd in loaded_pure_datasets:
+            ref = pd.get("ds_ref", "")
+            if ref and ref not in seen_ds_refs:
+                seen_ds_refs.add(ref)
+                entries = [_fcda_to_entry(entry) for entry in pd.get("entries", [])]
+                self._ds_manager.register_dataset(
+                    ld_inst=pd.get("ld_inst", ""),
+                    ds_name=pd.get("ds_name", ""),
+                    data_set_ref=ref,
+                    entries=entries,
+                )
+
+        # GOOSE 控制块引用的 DataSet
+        for gse in loaded_gse_controls:
+            # data_set_ref 在 GseControlInfo 中可能为空（to_publisher_dict 动态计算但属性未设值）
+            ref = gse.data_set_ref
+            if not ref and gse.dat_set:
+                ref = f"{gse.ld_inst}/{gse.ln_class}${gse.dat_set}"
+            if ref and ref not in seen_ds_refs:
+                seen_ds_refs.add(ref)
+                entries = [_fcda_to_entry(m) for m in gse.dataset_members]
+                ld_inst = gse.ld_inst
+                ds_name = ref.split("$")[-1] if "$" in ref else ""
+                self._ds_manager.register_dataset(
+                    ld_inst=ld_inst,
+                    ds_name=ds_name,
+                    data_set_ref=ref,
+                    entries=entries,
+                )
+
+        # Report 引用的 DataSet
+        for rc in loaded_report_controls:
+            ref = rc.data_set_ref
+            if ref and ref not in seen_ds_refs:
+                seen_ds_refs.add(ref)
+                entries = [_fcda_to_entry(e) for e in rc.entries]
+                ds_name = ref.split("$")[-1] if "$" in ref else rc.dat_set
+                self._ds_manager.register_dataset(
+                    ld_inst=rc.ld_inst,
+                    ds_name=ds_name,
+                    data_set_ref=ref,
+                    entries=entries,
+                )
+
+        # 4b. 注册 GOOSE 控制块（带 _type 标记，确保 apply_pending 能正确处理）
+        self._ds_manager.pending_registrations.clear()
+        for gse in loaded_gse_controls:
+            pub = gse.to_publisher_dict()
+            pub["_type"] = "gocb"
+            self._ds_manager.pending_registrations.append(pub)
+
+        # 5. 应用待注册配置
+        self._apply_pending_registrations()
+
+        # 6. 应用 Report 配置（去重，RptEnabled max 多实例展开后防止重复）
+        seen_rcb_names: set[tuple[str, str, str]] = set()
+        for rc in loaded_report_controls:
+            rcb_key = (rc.ld_inst, rc.ln_name or "LLN0", rc.name)
+            if rcb_key in seen_rcb_names:
+                continue
+            seen_rcb_names.add(rcb_key)
+            try:
+                self._report_manager.register_rcb(
+                    ld_inst=rc.ld_inst,
+                    name=rc.name,
+                    rpt_id=rc.rpt_id,
+                    data_set_ref=rc.dat_set,
+                    conf_rev=rc.conf_rev,
+                    buf_time=rc.buf_time,
+                    intg_period=rc.intg_period,
+                    rcb_type=rc.rcb_type,
+                    ln_name=rc.ln_name,
+                    trg_ops=rc.trg_ops,
+                    opt_fields=rc.opt_fields,
+                )
+            except Exception as e:
+                log.warning(f"注册 ReportControl 失败: {rc.name}, error={e}")
+
+        # 7. 注册 SettingControl、Log 与 LogControl。它们属于本地服务端
+        # 模型能力，必须在 IedServer_create 之前挂到原生 IedModel 上。
+        self._setting_group_manager.load_from_scl(result.doc, ied_name)
+        self._log_manager.load_from_scl(result.doc, ied_name)
+
+        self._model_loaded = True
+        self._loaded_icd_path = icd_path
+        self._last_import_result = result  # 存储解析结果，供后续获取测点列表
+        log.info(f"IED 模型加载完成: {ied_name}, LD={len(seen_lds)}, ICD={icd_path}")
+        return True
+
+    def get_icd_points(self) -> dict[str, list]:
+        """获取最近一次 ICD 导入的测点列表
+
+        Returns:
+            {"yc_points": [...], "yx_points": [...], "yk_points": [...], "yt_points": [...]}
+            每个 point 包含 code, name, reg_addr, fc, cdc, da_name
+        """
+        if not self._model_loaded or self._last_import_result is None:
+            return {"yc_points": [], "yx_points": [], "yk_points": [], "yt_points": []}
+        result = self._last_import_result
+
+        def _loaded(points: list[Any]) -> list[Any]:
+            """判断服务端模型与基础逻辑设备是否已经创建完成。"""
+            if not self._loaded_ied_ld_insts:
+                return points
+            return [point for point in points if point.reg_addr.split("/", 1)[0] in self._loaded_ied_ld_insts]
+
+        return {
+            "yc_points": _loaded(result.points.yc_points),
+            "yx_points": _loaded(result.points.yx_points),
+            "yk_points": _loaded(result.points.yk_points),
+            "yt_points": _loaded(result.points.yt_points),
+        }
+
+    def get_discovered_goose_items(self) -> list[dict[str, Any]]:
+        """返回当前模型中发现的 GOOSE 发布与订阅配置项。"""
+        if not self._model_loaded or self._last_import_result is None:
+            return []
+        return [
+            gse.to_subscription_dict()
+            for gse in self._last_import_result.goose.gse_controls
+            if not self._loaded_ied_ld_insts or gse.ld_inst in self._loaded_ied_ld_insts
+        ]
+
+    def start_device(self) -> bool:
+        """启动 MMS 服务（模型必须已加载）
+
+        先决条件: 必须先调用 load_model() 加载 ICD 模型。
+
+        Returns:
+            是否启动成功
+        """
+        if self._is_running:
+            log.warning("MMS 服务器已在运行中")
+            return True
+
+        if not self._model_loaded:
+            log.error("模型未加载，请先调用 load_model(icd_path)")
+            return False
+
+        log.info(f"正在启动 MMS 服务器 (模型: {self.ied_name})...")
+
+        self._server = self._create_ied_server()
+        if not self._server:
+            self._is_running = False
+            log.error("IedServer_create 失败")
+            return False
+
+        iec61850.IedServer_setServerIdentity(self._server, "EMS", self.model_name, "1.0")
+        self._configure_authentication()
+        self._is_running = True
+        iec61850.IedServer_setLocalIpAddress(self._server, self.ip)
+        iec61850.IedServer_start(self._server, self.port)
+
+        if iec61850.IedServer_isRunning(self._server):
+            log.info(f"IEC 61850 MMS 服务器启动成功 (模型: {self.ied_name}, 端口: {self.port})")
+            try:
+                self._report_manager.set_server(self._server)
+            except Exception as e:
+                log.warning(f"注入 ReportManager IedServer 引用失败: {e}")
+            try:
+                self._init_standard_bda_defaults()
+                self._apply_du_descriptions()
+            except Exception as e:
+                log.warning(f"初始化标准 DA 默认值异常: {e}")
+            self._try_enable_goose_publishing()
+            import platform
+            import time as _time
+
+            _time.sleep(0.3)
+            if platform.system() != "Windows":
+                try:
+                    self._enable_all_goose_cbs()
+                except Exception as e:
+                    log.warning(f"设置 GoCB GoEna 异常: {e}")
+            return True
+        else:
+            self._is_running = False
+            log.error(f"IEC 61850 MMS 服务器启动失败 (端口: {self.port})")
+            return False
+
+    @property
+    def model_loaded(self) -> bool:
+        """模型是否已加载"""
+        return self._model_loaded
+
+    @property
+    def loaded_icd_path(self) -> str:
+        """已加载的 ICD 文件路径"""
+        return self._loaded_icd_path
+
+    def apply_model_changes(self) -> bool:
+        """应用模型变更: 若 IedServer 已运行且有变更，重建 IedServer"""
+        if not self._model_changed or not self._is_running:
+            return False
+        log.info("检测到 IedModel 变更，重建 IedServer 以更新 MMS 命名空间...")
+        self._model_changed = False
+        try:
+            if self._server:
+                try:
+                    iec61850.IedServer_stop(self._server)
+                    iec61850.IedServer_destroy(self._server)
+                except Exception as e:
+                    log.warning(f"停止旧 IedServer 时出错: {e}")
+                self._server = None
+            import time as _time
+
+            _time.sleep(0.5)
+
+            # 重建前重新应用待注册的 RCB (重建 IedServer 后模型会丢失上次创建的 RCB)
+            rc_reapplied = 0
+            if self._report_manager.model_changed:
+                rc_reapplied = self._report_manager.apply_pending_rcbs()
+                if rc_reapplied > 0:
+                    log.info(f"IedServer 重建前重新创建了 {rc_reapplied} 个 RCB")
+
+            self._server = self._create_ied_server()
+            if not self._server:
+                self._is_running = False
+                log.error("重建 IedServer 失败")
+                return False
+            iec61850.IedServer_setServerIdentity(self._server, "EMS", self.model_name, "1.0")
+            self._configure_authentication()
+            iec61850.IedServer_setLocalIpAddress(self._server, self.ip)
+            iec61850.IedServer_start(self._server, self.port)
+            if iec61850.IedServer_isRunning(self._server):
+                log.info("IedServer 重建成功")
+                try:
+                    self._report_manager.set_server(self._server)
+                except Exception as e:
+                    log.warning(f"重建后注入 ReportManager IedServer 引用失败: {e}")
+                self._init_standard_bda_defaults()
+                self._apply_du_descriptions()
+                self._try_enable_goose_publishing()
+                import platform
+                import time as _time
+
+                _time.sleep(0.3)
+                if platform.system() != "Windows":
+                    self._enable_all_goose_cbs()
+                return True
+            else:
+                self._is_running = False
+                log.error("IedServer 重建后启动失败")
+                return False
+        except Exception as e:
+            log.error(f"重建 IedServer 失败: {e}", exc_info=True)
+            self._is_running = False
+            return False
+
+    def start(self, register_default_rcbs: bool = False):
+        """启动 IEC 61850 MMS 服务器
+
+        v3.0+: 必须先通过 load_model() 加载 ICD 模型才能启动，不再支持默认 GenericLD 模型。
+
+        Args:
+            register_default_rcbs: 是否注册默认 BRCB (brcb01/brcb02)。
+                ICD 导入时应设为 False，避免在默认 LD 上创建多余 RCB。
+        """
+        if not self._model_loaded:
+            log.error("启动失败: 未加载 ICD 模型，请先调用 load_model(icd_path)")
+            return
+
+        if self._is_running:
+            if self._model_changed:
+                self.apply_model_changes()
+            return
+
+        if register_default_rcbs:
+            log.warning("register_default_rcbs 已停用：服务端不再创建任何默认 LD/RCB")
+        self._apply_pending_registrations()
+
+        log.info(
+            f"IedServer_create 前模型诊断: "
+            f"GoCB={len(self._goose_cb_list)}, "
+            f"DataSet={len(self._dataset_catalog)}, "
+            f"pending={len(self._pending_goose_registrations)}, "
+            f"LD={list(self._ld_map.keys()) or [self.ld_name]}, "
+            f"LN={list(self._ln_map.keys())}"
+        )
+
+        self._server = self._create_ied_server()
+        iec61850.IedServer_setServerIdentity(self._server, "EMS", self.model_name, "1.0")
+        self._configure_authentication()
+        self._is_running = True
+        iec61850.IedServer_setLocalIpAddress(self._server, self.ip)
+        iec61850.IedServer_start(self._server, self.port)
+
+        if iec61850.IedServer_isRunning(self._server):
+            log.info(f"IEC 61850 MMS 服务器已启动, 端口: {self.port}")
+            # 注入 IedServer 引用到 ReportManager，使 UI 能读取 RCB 运行时状态
+            try:
+                self._report_manager.set_server(self._server)
+            except Exception as e:
+                log.warning(f"注入 ReportManager IedServer 引用失败 (非致命): {e}")
+            try:
+                self._init_standard_bda_defaults()
+                self._apply_du_descriptions()
+            except Exception as e:
+                log.warning(f"初始化标准 DA 默认值异常 (非致命): {e}")
+            self._try_enable_goose_publishing()
+            import platform
+            import time as _time
+
+            _time.sleep(0.3)
+            if platform.system() != "Windows":
+                try:
+                    self._enable_all_goose_cbs()
+                except Exception as e:
+                    log.warning(f"设置 GoCB GoEna 异常 (非致命): {e}")
+            else:
+                log.info("Windows 平台跳过 GoEna 设置")
+        else:
+            self._is_running = False
+            log.error(f"IEC 61850 服务器启动失败, 端口: {self.port}")
+
+    def _try_enable_goose_publishing(self):
+        """尝试启用 GOOSE 以太网发布（非致命）"""
+        import platform
+
+        if platform.system() == "Windows":
+            log.info("GOOSE 发布: Windows 平台不支持原始套接字，已跳过")
+            self._ds_manager._goose_publishing_enabled = False
+            return
+        interface = self._ds_manager.goose_interface
+        if interface and interface != "eth0":
+            try:
+                import subprocess
+
+                result = subprocess.run(["ip", "link", "show", interface], capture_output=True, timeout=3)
+                if result.returncode != 0:
+                    log.warning(f"GOOSE 网络接口 '{interface}' 不存在，跳过")
+                    self._ds_manager._goose_publishing_enabled = False
+                    return
+            except Exception:
+                pass
+        try:
+            iec61850.IedServer_setGooseInterfaceId(self._server, interface)
+        except Exception as e:
+            log.warning(f"设置 GOOSE 网络接口失败 ({interface}): {e}")
+        try:
+            iec61850.IedServer_enableGoosePublishing(self._server)
+            log.info("GOOSE 发布服务已启用")
+            self._ds_manager._goose_publishing_enabled = True
+        except Exception as e:
+            log.warning(f"启用 GOOSE 发布服务失败: {e}")
+            self._ds_manager._goose_publishing_enabled = False
+
+    def stop(self):
+        """停止 IEC 61850 MMS 服务器"""
+        if self._server and self._is_running:
+            iec61850.IedServer_stop(self._server)
+            iec61850.IedServer_destroy(self._server)
+            self._server = None
+            self._is_running = False
+            self._stop_connection_event_worker()
+            log.info("IEC 61850 服务器已停止")
+
+    def restart(self) -> bool:
+        """重启 MMS 服务器"""
+        if self._server:
+            try:
+                iec61850.IedServer_stop(self._server)
+                iec61850.IedServer_destroy(self._server)
+            except Exception:
+                pass
+        self._server = None
+        self._is_running = False
+        import time as _time
+
+        _time.sleep(1)
+        self._server = self._create_ied_server()
+        if not self._server:
+            log.error("重启失败: IedServer_create 返回空")
+            return False
+        iec61850.IedServer_setServerIdentity(self._server, "EMS", self.model_name, "1.0")
+        self._configure_authentication()
+        self._is_running = True
+        iec61850.IedServer_setLocalIpAddress(self._server, self.ip)
+        iec61850.IedServer_start(self._server, self.port)
+        if iec61850.IedServer_isRunning(self._server):
+            log.info(f"IEC 61850 服务器重启成功, 端口: {self.port}")
+            try:
+                self._report_manager.set_server(self._server)
+            except Exception as e:
+                log.warning(f"重启后注入 ReportManager IedServer 引用失败: {e}")
+            self._init_standard_bda_defaults()
+            self._try_enable_goose_publishing()
+            import platform
+            import time as _time
+
+            _time.sleep(0.3)
+            if platform.system() != "Windows":
+                self._enable_all_goose_cbs()
+            return True
+        else:
+            self._is_running = False
+            log.error("IEC 61850 服务器重启失败")
+            return False
+
+    @property
+    def is_running(self) -> bool:
+        """判断IEC 61850 服务端是否处于运行状态。"""
+        if self._server:
+            return iec61850.IedServer_isRunning(self._server)
+        return False
+
+    # ===== 读写 =====
+
+    def get_point_value(self, address, fc: str = "") -> Any:
+        """获取测点值"""
+        if not self._server or not self._is_running:
+            return 0
+        addr_str = str(address)
+        da, resolved_addr = self._builder.resolve_da(address)
+        if not da:
+            log.warning(f"IEC61850 读取测点值时未找到 DataAttribute: address={address}")
+            return 0
+        if not hasattr(da, "this"):
+            log.error(f"IEC61850 数据属性对象类型错误: address={address}")
+            return 0
+        iec_type = self._point_iec_type.get(resolved_addr, self._point_iec_type.get(addr_str, "unknown"))
+        try:
+            if iec_type == "float":
+                value = iec61850.IedServer_getFloatAttributeValue(self._server, da)
+                return float(value) if value is not None else 0.0
+            elif iec_type == "boolean":
+                value = iec61850.IedServer_getBooleanAttributeValue(self._server, da)
+                return bool(value) if value is not None else False
+            elif iec_type == "integer":
+                value = iec61850.IedServer_getInt32AttributeValue(self._server, da)
+                return int(value) if value is not None else 0
+            elif iec_type == "string":
+                value = iec61850.IedServer_getStringAttributeValue(self._server, da)
+                return str(value).strip() if value else ""
+            elif iec_type == "quality":
+                value = iec61850.IedServer_getUInt32AttributeValue(self._server, da)
+                return int(value) if value is not None else 0
+            elif iec_type == "timestamp":
+                value = iec61850.IedServer_getUTCTimeAttributeValue(self._server, da)
+                return int(value) if value is not None else 0
+            else:
+                try:
+                    value = iec61850.IedServer_getFloatAttributeValue(self._server, da)
+                    return float(value) if value is not None else 0.0
+                except Exception:
+                    pass
+                try:
+                    value = iec61850.IedServer_getBooleanAttributeValue(self._server, da)
+                    return bool(value) if value is not None else False
+                except Exception:
+                    pass
+                try:
+                    value = iec61850.IedServer_getInt32AttributeValue(self._server, da)
+                    return int(value) if value is not None else 0
+                except Exception:
+                    pass
+                return 0
+        except Exception as e:
+            log.error(f"IEC61850 调用底层获取值函数失败: address={address}, error={e}")
+            return 0
+
+    def set_enum_attribute(self, address: str, value: Any, fc: str = "") -> bool:
+        """Set an SCL enum without creating a polling/business point."""
+        model = getattr(self, "scl_model", None)
+        attribute = model.find_attribute(address, fc) if model is not None else None
+        if attribute is None or attribute.b_type.upper() != "ENUM":
+            raise ValueError("模型中不存在该枚举属性")
+        model.validate_enum_value(address, value, attribute.fc)
+        if not self._server or not self._is_running:
+            raise ValueError("服务端未运行，无法设置模型属性")
+        da, _ = self._builder.resolve_da(address)
+        if da is None:
+            raise ValueError(f"未找到原生枚举属性: {address}")
+        if attribute.name == "ctlModel" and attribute.fc == "CF":
+            # Updating the DA alone leaves libIEC61850's internal control state stale.
+            do_ref = address.rsplit(".", 1)[0]
+            do = self._builder._do_map.get(do_ref)
+            if do is None or not 0 <= value <= 4:
+                raise ValueError("控制模型必须属于 0..4 且引用有效的控制对象")
+            iec61850.IedServer_updateCtlModel(self._server, do, value)
+        else:
+            iec61850.IedServer_updateInt32AttributeValue(self._server, da, value)
+        if iec61850.IedServer_getInt32AttributeValue(self._server, da) != value:
+            raise ValueError("模型属性设值后读回不一致")
+        self._log_manager.record(address, value)
+        return True
+
+    def set_point_value(self, address, value: Any, fc: str = "") -> None:
+        """设置测点值"""
+        if not self._server or not self._is_running:
+            return
+        addr_str = str(address)
+        da, resolved_addr = self._builder.resolve_da(address)
+        if not da:
+            log.warning(f"IEC61850 设置测点值时未找到 DataAttribute: address={address}")
+            return
+        if not hasattr(da, "this"):
+            log.error(f"IEC61850 数据属性对象类型错误(设置值): address={address}")
+            return
+        model = getattr(self, "scl_model", None)
+        attribute = model.find_attribute(resolved_addr, fc) if model is not None else None
+        if (
+            attribute is not None
+            and attribute.b_type.upper() == "ENUM"
+            and attribute.name == "ctlModel"
+            and attribute.fc == "CF"
+        ):
+            self.set_enum_attribute(resolved_addr, value, attribute.fc)
+            return
+        iec_type = self._point_iec_type.get(resolved_addr, self._point_iec_type.get(addr_str, "unknown"))
+        try:
+            if isinstance(value, str) or iec_type == "string":
+                iec61850.IedServer_updateVisibleStringAttributeValue(self._server, da, str(value))
+            elif iec_type == "float":
+                iec61850.IedServer_updateFloatAttributeValue(self._server, da, float(value))
+            elif iec_type == "integer":
+                if isinstance(value, int) and not isinstance(value, bool):
+                    iec61850.IedServer_updateInt32AttributeValue(self._server, da, int(value))
+                else:
+                    iec61850.IedServer_updateBooleanAttributeValue(self._server, da, bool(value))
+            elif iec_type == "boolean":
+                iec61850.IedServer_updateBooleanAttributeValue(self._server, da, bool(value))
+            elif iec_type == "quality":
+                iec61850.IedServer_updateQuality(self._server, da, int(value))
+            elif iec_type == "timestamp":
+                iec61850.IedServer_updateUTCTimeAttributeValue(self._server, da, int(value))
+            else:
+                if isinstance(value, float):
+                    iec61850.IedServer_updateFloatAttributeValue(self._server, da, float(value))
+                elif isinstance(value, bool):
+                    iec61850.IedServer_updateBooleanAttributeValue(self._server, da, bool(value))
+                elif isinstance(value, int):
+                    iec61850.IedServer_updateInt32AttributeValue(self._server, da, int(value))
+        except Exception as e:
+            log.error(f"IEC61850 调用底层设置值函数失败: address={address}, value={value}, error={e}")
+        else:
+            self._log_manager.record(address, value)
+
+    def set_point_values(self, values: list[tuple[Any, Any, str]]) -> bool:
+        """在一次数据模型事务中批量更新测点。
+
+        libIEC61850 会在 ``unlockDataModel`` 时统一处理本轮变化。这样随机
+        模拟一次更新大量 DataAttribute 时，同一个 RCB 不会为每个测点各
+        生成一份报告，从源头避免报告风暴。
+        """
+        if not self._server or not self._is_running:
+            return False
+        if not values:
+            return True
+
+        lock_model = getattr(iec61850, "IedServer_lockDataModel", None)
+        unlock_model = getattr(iec61850, "IedServer_unlockDataModel", None)
+        locked = False
+        try:
+            if callable(lock_model) and callable(unlock_model):
+                lock_model(self._server)
+                locked = True
+            for address, value, fc in values:
+                self.set_point_value(address, value, fc=fc)
+            return True
+        except Exception as e:
+            log.error(f"IEC61850 批量设置测点值失败: count={len(values)}, error={e}")
+            return False
+        finally:
+            if locked:
+                try:
+                    unlock_model(self._server)
+                except Exception as e:
+                    log.error(f"IEC61850 解锁数据模型失败: {e}")
+
+    # ===== Reports (委托给 report_manager) =====
+
+    @property
+    def reports(self):
+        """获取 Reports 管理对象"""
+        return self._report_manager
+
+    @property
+    def setting_groups(self):
+        """获取服务端定值组管理对象。"""
+        return self._setting_group_manager
+
+    @property
+    def logs(self):
+        """获取服务端日志管理对象。"""
+        return self._log_manager
+
+    def set_du_descriptions(self, descriptions: dict[str, str]) -> None:
+        """存储 DO 的 dU 描述值，服务器运行后自动应用
+
+        Args:
+            descriptions: {do_key: desc} 映射,
+                          do_key 如 "LD/LLN0.Temp001" (LD_inst/LN_name.DO_name)
+        """
+        if not descriptions:
+            return
+        applicable = {
+            do_key: desc for do_key, desc in descriptions.items() if desc and f"{do_key}.dU" in self._builder._da_map
+        }
+        if not applicable:
+            return
+        self._du_descriptions.update(applicable)
+        log.info(
+            f"已存储 {len(applicable)} 个 DO 的描述, "
+            f"总计 {len(self._du_descriptions)} 个, "
+            f"服务器运行={'是' if self._is_running else '否'}"
+        )
+        self._apply_du_descriptions()
+
+    def _apply_du_descriptions(self) -> None:
+        """应用已存储的 dU 描述值到运行中的 IedServer"""
+        if not self._du_descriptions or not self._server or not self._is_running:
+            log.debug(
+                f"_apply_du_descriptions: 条件不满足, desc={len(self._du_descriptions)}, running={self._is_running}"
+            )
+            return
+        set_count = 0
+        not_found = []
+        for do_key, desc in list(self._du_descriptions.items()):
+            if not desc:
+                continue
+            du_key = f"{do_key}.dU"
+            da = self._builder._da_map.get(du_key)
+            if da and hasattr(da, "this"):
+                try:
+                    iec61850.IedServer_updateVisibleStringAttributeValue(self._server, da, str(desc))
+                    set_count += 1
+                except Exception as e:
+                    log.debug(f"设置 dU 描述失败: {do_key}={desc}, {e}")
+            else:
+                not_found.append(do_key)
+        if set_count > 0:
+            log.info(f"已应用 {set_count} 个 DO 的 dU 描述值")
+        if not_found:
+            log.warning(f"以下 {len(not_found)} 个 DO 的 dU DA 未在 _da_map 中找到 (前5): {not_found[:5]}")
+
+    def _build_point_fcda_entries(self) -> list[dict[str, Any]]:
+        """从已注册的测点构建 FCDA 条目列表
+
+        DataSet 的 FCDA 条目需要引用 MMS 模型中已存在的 DataAttribute，
+        每个条目包含 name(LD/LN.DO.DA)、fc(功能约束) 和 iec_type。
+
+        Returns:
+            FCDA 条目列表，每个条目格式:
+            {"name": "LD_inst/LN_name.DO_name.mag.f", "fc": "MX", "iec_type": "float"}
+        """
+        ied_prefix = self.model_name
+        entries = []
+        for address, ref in self._point_refs.items():
+            # ref 格式: "{IEDName}{LD_inst}/{LN_name}.{DO_name}.{DA_path}"
+            # FCDA entry name 需要: "{LD_inst}/{LN_name}.{DO_name}.{DA_path}" (不含 IEDName)
+            # 当 nameStructure="IEDName" 时 LD 已含 IEDName 前缀，此时 ref 的
+            # LD 部分即是 MMS 模型中完整的 LD 名，无需剥离前缀。
+            if "/" in ref:
+                ref_ld = ref.split("/")[0]
+                if ref_ld in self._ld_map:
+                    fcda_name = ref  # 已在 ld_map 中，说明 LD 名不含前缀
+                elif ref.startswith(ied_prefix):
+                    fcda_name = ref[len(ied_prefix) :]
+                else:
+                    fcda_name = ref
+            elif ref.startswith(ied_prefix):
+                fcda_name = ref[len(ied_prefix) :]
+            else:
+                fcda_name = ref
+            fc = self._point_fc.get(address, "MX")
+            iec_type = self._point_iec_type.get(address, "unknown")
+            mms_type = self._point_mms_type.get(address, "MMS_UNKNOWN")
+            entries.append({"name": fcda_name, "fc": fc, "iec_type": iec_type, "mms_type": mms_type})
+        return entries
+
+    def _register_default_rcbs(self):
+        """注册默认报告控制块 (BRCB/URCB)
+
+        为服务端默认逻辑设备创建 RCB，绑定到对应的 DataSet。
+        每个 IED 都应该至少有一个 BRCB 用于支持报告功能。
+
+        注意: 依赖 libIEC61850 的 ReportControlBlock_create API，
+        部分版本可能未暴露此 API 到 Python SWIG。
+        """
+        log.warning("默认 RCB/LD 自动创建已停用；仅使用 ICD/SCL 中声明的模型")
+        return
+
+        # 检查模型中是否已有用户自定义的 LD（来自 ICD 导入等）。
+        # 如果已有，说明用户使用了 ICD 自定义模型，跳过默认 GenericLD 的创建。
+        default_ld = self.ld_name
+        other_lds = [k for k in self._builder.ld_map if k != default_ld]
+        if other_lds:
+            log.info(f"检测到已有自定义 LD: {other_lds}，跳过默认 RCB 注册")
+            return
+
+        # 检查是否已有测点注册到非默认 LD
+        has_custom_points = any(not ref.startswith(f"{default_ld}/") for ref in self._builder.point_refs.values())
+        if has_custom_points:
+            log.info("检测到已有自定义测点，跳过默认 RCB 注册")
+            return
+
+        # 为默认 LD 创建 DataSet 和 BRCB
+        default_rcbs = [
+            {
+                "ld_inst": default_ld,
+                "ln_name": "LLN0",
+                "name": "brcb01",
+                "rcb_type": "BRCB",
+                "rpt_id": "brcb01",
+                "data_set_ref": f"{default_ld}/LLN0$dsReport1",
+                "conf_rev": 1,
+                "buf_time": 0,
+                "trg_ops": {"dchg": True, "qchg": False, "dupd": False, "period": False, "gi": True},
+                "opt_fields": {
+                    "seq_num": True,
+                    "time_stamp": True,
+                    "data_set": True,
+                    "reason_code": True,
+                    "data_ref": False,
+                    "entry_id": True,
+                    "config_ref": False,
+                    "buf_ovfl": False,
+                },
+            },
+            {
+                "ld_inst": default_ld,
+                "ln_name": "LLN0",
+                "name": "brcb02",
+                "rcb_type": "BRCB",
+                "rpt_id": "brcb02",
+                "data_set_ref": f"{default_ld}/LLN0$dsReport2",
+                "conf_rev": 1,
+                "buf_time": 100,
+                "trg_ops": {"dchg": True, "qchg": True, "dupd": False, "period": True, "gi": True},
+                "opt_fields": {
+                    "seq_num": True,
+                    "time_stamp": True,
+                    "data_set": True,
+                    "reason_code": True,
+                    "data_ref": False,
+                    "entry_id": True,
+                    "config_ref": False,
+                    "buf_ovfl": False,
+                },
+            },
+        ]
+
+        # 从已注册的测点构建 FCDA 条目，使 DataSet 有实际数据可报告
+        point_entries = self._build_point_fcda_entries()
+        if point_entries:
+            log.info(f"自动构建 {len(point_entries)} 个 FCDA 条目用于默认报告 DataSet")
+        else:
+            log.warning(
+                "未发现已注册的测点，默认报告 DataSet 将为空！"
+                "请确保在调用 start() 前已通过 add_points() 或 add_point() 注册测点。"
+            )
+
+        registered_count = 0
+        failed_count = 0
+        for rcb_cfg in default_rcbs:
+            # 先注册 DataSet（如果还不存在）
+            ds_name = rcb_cfg["data_set_ref"].split("$")[-1]
+            if not any(ds.get("ref") == rcb_cfg["data_set_ref"] for ds in self._ds_manager.browse_datasets()):
+                self._ds_manager.register_dataset(
+                    ld_inst=rcb_cfg["ld_inst"],
+                    ds_name=ds_name,
+                    data_set_ref=rcb_cfg["data_set_ref"],
+                    entries=point_entries if point_entries else None,
+                )
+                log.info(f"为默认 RCB 自动创建 DataSet: {rcb_cfg['data_set_ref']}, entries={len(point_entries)}")
+
+            # 注册 RCB
+            success = self._report_manager.register_rcb(
+                ld_inst=rcb_cfg["ld_inst"],
+                name=rcb_cfg["name"],
+                rcb_type=rcb_cfg["rcb_type"],
+                rpt_id=rcb_cfg["rpt_id"],
+                data_set_ref=rcb_cfg["data_set_ref"],
+                conf_rev=rcb_cfg["conf_rev"],
+                buf_time=rcb_cfg["buf_time"],
+                trg_ops=rcb_cfg.get("trg_ops"),
+                opt_fields=rcb_cfg.get("opt_fields"),
+                ln_name=rcb_cfg.get("ln_name", "LLN0"),
+            )
+            if success:
+                registered_count += 1
+                log.info(f"默认 RCB 已注册到 MMS 模型: {rcb_cfg['name']} ({rcb_cfg['rcb_type']})")
+            else:
+                failed_count += 1
+                log.warning(f"默认 RCB 注册失败: {rcb_cfg['name']} ({rcb_cfg['rcb_type']})")
+
+        if failed_count > 0:
+            log.warning(
+                f"默认 RCB 注册结果: 成功={registered_count}/{len(default_rcbs)}, 失败={failed_count}。"
+                f"原因: libIEC61850 的 ReportControlBlock_create API 可能未暴露到 Python SWIG，"
+                f"MMS 服务器中将没有报告控制块"
+            )
+
+    # ===== 浏览方法 (委托给 builder) =====
+
+    def browse_logical_devices(self) -> list[str]:
+        """浏览逻辑设备并返回可见条目。"""
+        return self._builder.browse_logical_devices()
+
+    def browse_logical_nodes(self, ld_inst: str) -> list[str]:
+        """浏览逻辑节点并返回可见条目。"""
+        return self._builder.browse_logical_nodes(ld_inst)
+
+    def browse_data_objects(self, ld_inst: str, ln_name: str) -> list[dict]:
+        """浏览数据对象并返回可见条目。"""
+        return self._builder.browse_data_objects(ld_inst, ln_name)
+
+    def browse_data_attributes(self, ld_inst: str, ln_name: str, do_name: str) -> list[dict]:
+        """浏览数据数据属性并返回可见条目。"""
+        return self._builder.browse_data_attributes(ld_inst, ln_name, do_name)
+
+    # ===== GOOSE / DataSet (委托给 ds_manager) =====
+
+    def add_goose_control_block(
+        self,
+        name,
+        app_id,
+        data_set_ref,
+        conf_rev,
+        go_id="",
+        min_time=10,
+        max_time=1000,
+        ld_inst=None,
+        entries=None,
+        dst_mac=None,
+        vlan_id=0,
+        vlan_prio=4,
+    ) -> bool:
+        """在 LLN0 下创建 GSEControlBlock (委托给 ds_manager)"""
+        result = self._ds_manager.add_goose_control_block(
+            name,
+            app_id,
+            data_set_ref,
+            conf_rev,
+            go_id,
+            min_time,
+            max_time,
+            ld_inst,
+            entries,
+            dst_mac,
+            vlan_id,
+            vlan_prio,
+        )
+        if result and self._server and self._is_running:
+            self._model_changed = True
+            log.info(f"GoCB {name} 在 IedServer 运行时添加，需要重建 IedServer")
+        return result
+
+    def register_dataset(self, ld_inst, ds_name, data_set_ref, entries=None, dataset_catalog=None) -> bool:
+        """注册 DataSet (委托给 ds_manager)"""
+        result = self._ds_manager.register_dataset(
+            ld_inst,
+            ds_name,
+            data_set_ref,
+            entries,
+            dataset_catalog,
+        )
+        if result and self._server and self._is_running:
+            self._model_changed = True
+            log.info(f"DataSet {ds_name} 在 IedServer 运行时添加，需要重建 IedServer")
+        return result
+
+    def _add_fcda_entries_to_dataset(self, data_set, entries, default_ld_inst) -> int:
+        """向 DataSet 添加 FCDA 条目 (委托给 ds_manager)"""
+        return self._ds_manager._add_fcda_entries_to_dataset(data_set, entries, default_ld_inst)
+
+    def browse_datasets(self) -> list[dict[str, Any]]:
+        """浏览已注册的 DataSet (委托给 ds_manager)"""
+        return self._ds_manager.browse_datasets()
+
+    def _enable_single_goose_cb(self, ld_inst, cb_name, max_retries=3, retry_delay=0.5):
+        """设置单个 GoCB 的 GoEna=TRUE (委托给 ds_manager)"""
+        self._ds_manager.enable_single_goose_cb(
+            self._server, self.port, self.model_name, ld_inst, cb_name, max_retries, retry_delay
+        )
+
+    def _enable_all_goose_cbs(self):
+        """设置所有 GoCB 的 GoEna=TRUE (委托给 ds_manager)"""
+        self._ds_manager.enable_all_goose_cbs(self._server, self.port, self.model_name)
+
+    def set_goose_interface(self, interface: str):
+        """设置 GOOSE 网络接口"""
+        self._ds_manager.goose_interface = interface
+        if self._server:
+            with contextlib.suppress(Exception):
+                iec61850.IedServer_setGooseInterfaceId(self._server, interface)
+
+    def destroy(self):
+        """销毁服务器和模型"""
+        self.stop()
+        if self._builder.model:
+            iec61850.IedModel_destroy(self._builder.model)

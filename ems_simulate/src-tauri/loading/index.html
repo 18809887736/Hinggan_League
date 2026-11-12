@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EMS Simulate</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      height: 100vh; font-family: 'Segoe UI', Tahoma, sans-serif;
+      background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+      color: #e0e0e0; overflow: hidden;
+    }
+    .container { text-align: center; animation: fadeIn 0.5s ease; }
+    .logo { font-size: 64px; margin-bottom: 24px; }
+    .title { font-size: 28px; font-weight: 700; margin-bottom: 8px; letter-spacing: 2px; }
+    .subtitle { font-size: 14px; color: #888; margin-bottom: 40px; }
+    .spinner {
+      display: inline-block; width: 48px; height: 48px;
+      border: 4px solid rgba(255,255,255,0.15);
+      border-top-color: #4fc3f7; border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    .status { margin-top: 20px; font-size: 13px; color: #aaa; }
+    .dots::after { content: ''; animation: dots 1.5s steps(4, end) infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
+
+    /* 关闭动画 */
+    .closing-overlay {
+      position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+      background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+      z-index: 9999; display: flex; align-items: center; justify-content: center;
+      animation: closeFadeIn 0.4s ease forwards;
+    }
+    .closing-spinner {
+      display: inline-block; width: 32px; height: 32px;
+      border: 3px solid rgba(255,255,255,0.15); border-top-color: #4fc3f7;
+      border-radius: 50%; animation: spin 0.7s linear infinite; margin-bottom: 12px;
+    }
+    .closing-text { color: #ccc; font-size: 13px; letter-spacing: 1px; }
+    @keyframes closeFadeIn { from { opacity: 0; } to { opacity: 1; } }
+  </style>
+</head>
+<body>
+  <div class="container" id="main-container">
+    <div class="logo">⚡</div>
+    <div class="title">EMS Simulate</div>
+    <div class="subtitle">工业协议仿真平台</div>
+    <div class="spinner" id="spinner"></div>
+    <div class="status" id="status-text">EMS模拟设备启动中<span class="dots"></span></div>
+  </div>
+  <script>
+    // A local process normally becomes ready quickly. A 500 ms interval added
+    // up to half a second of avoidable delay after the backend was listening.
+    var POLL_INTERVAL = 100;
+    var STARTUP_TIMEOUT = 30 * 1000; // 30 秒超时
+    var BACKEND_URL = 'http://127.0.0.1:8991'; // 默认，Tauri 环境下动态获取
+    var backendUrlReady = Promise.resolve(BACKEND_URL);
+
+    function showError(msg) {
+      var statusEl = document.getElementById('status-text');
+      if (statusEl) {
+        statusEl.innerHTML = '<span style="color:#e57373">' + msg + '</span>';
+      }
+      var spinner = document.getElementById('spinner');
+      if (spinner) { spinner.style.display = 'none'; }
+    }
+
+    function showStatus(msg) {
+      var statusEl = document.getElementById('status-text');
+      if (statusEl) { statusEl.textContent = msg; }
+    }
+
+    function backendHealthUrl() {
+      return BACKEND_URL.replace(/\/+$/, '') + '/api/health';
+    }
+
+    function redirectToBackend() {
+      window.location.href = BACKEND_URL;
+    }
+
+    function browserHealthReady() {
+      return fetch(backendHealthUrl(), { cache: 'no-store' })
+        .then(function (resp) {
+          if (!resp.ok) { return false; }
+
+          return resp.json().then(function (body) {
+            return !!(body && (body.code === 200 || (body.data && body.data.status === 'ok')));
+          }).catch(function () {
+            return resp.ok;
+          });
+        })
+        .catch(function (err) {
+          console.warn('[loading] browser health check failed:', err);
+          return false;
+        });
+    }
+    // 非 Tauri 环境（浏览器直接打开），直接跳转
+    if (!window.__TAURI_INTERNALS__) {
+      window.location.href = BACKEND_URL;
+    } else {
+      // ── Tauri 环境 ──
+
+      // 使用 window.__TAURI__ 全局 API（withGlobalTauri: true），
+      // 避免动态 import('@tauri-apps/api/...') 在裸 HTML 中加载失败导致无限转圈
+      var isPolling = false;
+      var pollStart = Date.now();
+      var pollCount = 0;
+
+      // 动态获取后端 URL（支持动态端口分配）
+      try {
+        backendUrlReady = window.__TAURI__.core.invoke('get_backend_url').then(function (url) {
+          if (url) { BACKEND_URL = url; }
+          return BACKEND_URL;
+        }).catch(function (err) {
+          console.warn('[loading] invoke get_backend_url failed:', err);
+          return BACKEND_URL;
+        });
+      } catch (e) {
+        backendUrlReady = Promise.resolve(BACKEND_URL);
+      }
+
+      // 关闭事件监听
+      try {
+        var appWindow = window.__TAURI__.window.getCurrentWindow();
+        appWindow.listen('close-requested', function () {
+          var overlay = document.createElement('div');
+          overlay.className = 'closing-overlay';
+          overlay.innerHTML = '<div style="text-align:center"><div class="closing-spinner"></div><div class="closing-text">正在关闭...</div></div>';
+          document.body.appendChild(overlay);
+        });
+      } catch (e) {
+        console.warn('[loading] close listener failed:', e);
+      }
+
+      // 轮询后端就绪状态
+      function poll() {
+        if (isPolling) return;
+        isPolling = true;
+
+        pollCount++;
+        var elapsed = Date.now() - pollStart;
+
+        var timedOut = elapsed > STARTUP_TIMEOUT;
+
+        function finishCheck(ready) {
+          isPolling = false;
+          if (ready) {
+            redirectToBackend();
+            return;
+          }
+
+          if (timedOut) {
+            showError('启动超时，请检查后台服务：' + backendHealthUrl());
+            return;
+          }
+
+          if (pollCount === 1) {
+            showStatus('EMS模拟设备启动中...');
+          } else {
+            showStatus('正在连接服务 (' + Math.floor(elapsed / 1000) + 's)...');
+          }
+          setTimeout(poll, POLL_INTERVAL);
+        }
+
+        browserHealthReady().then(function (healthReady) {
+          if (healthReady) {
+            finishCheck(true);
+            return;
+          }
+
+          try {
+            window.__TAURI__.core.invoke('is_backend_ready').then(function (ready) {
+              finishCheck(ready);
+            }).catch(function (err) {
+              console.warn('[loading] invoke is_backend_ready failed:', err);
+              finishCheck(false);
+            });
+          } catch (e) {
+            console.warn('[loading] invoke call failed:', e);
+            finishCheck(false);
+          }
+        });
+      }
+      backendUrlReady.then(function () {
+        poll();
+      });
+    }
+  </script>
+</body>
+</html>

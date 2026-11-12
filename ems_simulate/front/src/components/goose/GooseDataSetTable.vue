@@ -1,0 +1,171 @@
+<template>
+  <div class="dataset-table">
+    <el-empty v-if="!values.length" :description="$t('goose.noDataSetData')" />
+    <el-table
+      v-else
+      :data="values"
+      border
+      size="small"
+      height="100%"
+      :row-class-name="rowClass"
+      class="ied-table"
+    >
+      <el-table-column prop="index" label="#" width="55" align="center" />
+      <el-table-column
+        prop="name"
+        :label="$t('goose.dataRef')"
+        min-width="260"
+        show-overflow-tooltip
+      >
+        <template #default="{ row }">{{
+          row.name || `Entry[${row.index}]`
+        }}</template>
+      </el-table-column>
+      <el-table-column
+        prop="description"
+        :label="$t('goose.description')"
+        min-width="150"
+        show-overflow-tooltip
+      />
+      <el-table-column prop="fc" label="FC" width="70" align="center" />
+      <el-table-column prop="type" :label="$t('goose.type')" width="105" />
+      <el-table-column :label="$t('goose.prevValue')" min-width="120"
+        ><template #default="{ row }">{{
+          formatValue(row.previous_value, row.type)
+        }}</template></el-table-column
+      >
+      <el-table-column :label="$t('goose.currentValue')" min-width="180">
+        <template #default="{ row }">
+          <template v-if="editable">
+            <el-switch
+              v-if="row.type === 'boolean'"
+              v-model="row.value"
+              :loading="updatingIndex === row.index"
+              @change="updateValue(row)"
+            />
+            <el-input-number
+              v-else-if="
+                row.type === 'integer' ||
+                row.type === 'float' ||
+                row.type === 'timestamp'
+              "
+              v-model="row.value"
+              :step="row.type === 'float' ? 0.1 : 1"
+              :precision="row.type === 'float' ? 6 : 0"
+              :disabled="updatingIndex === row.index"
+              controls-position="right"
+              style="width: 100%"
+              @change="updateValue(row)"
+            />
+            <el-input
+              v-else
+              v-model="row.value"
+              :disabled="updatingIndex === row.index"
+              @change="updateValue(row)"
+            />
+          </template>
+          <template v-else>
+            <strong>{{ formatValue(row.value, row.type) }}</strong>
+            <el-tag
+              v-if="row.changed"
+              type="warning"
+              size="small"
+              class="changed-tag"
+            >
+              {{ $t("goose.changed") }}
+            </el-tag>
+          </template>
+        </template>
+      </el-table-column>
+    </el-table>
+  </div>
+</template>
+<script setup lang="ts">
+import { useI18n } from "vue-i18n";
+import type { GooseSubscriptionDataValue } from "@/api/gooseApi";
+import { formatGooseTime } from "./gooseWorkbench";
+const { t } = useI18n();
+const props = defineProps<{
+  values: GooseSubscriptionDataValue[];
+  editable?: boolean;
+  updatingIndex?: number | null;
+}>();
+const emit = defineEmits<{
+  (
+    event: "update-value",
+    payload: { index: number; value: string | number | boolean },
+  ): void;
+}>();
+function updateValue(row: GooseSubscriptionDataValue) {
+  if (
+    props.editable &&
+    ["string", "number", "boolean"].includes(typeof row.value)
+  ) {
+    emit("update-value", {
+      index: row.index,
+      value: row.value as string | number | boolean,
+    });
+  }
+}
+function formatValue(value: unknown, type?: string) {
+  if (value === null || value === undefined) return "-";
+  if (
+    type === "timestamp" &&
+    (typeof value === "number" || typeof value === "string")
+  ) {
+    return formatGooseTime(value);
+  }
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+function rowClass({ row }: { row: GooseSubscriptionDataValue }) {
+  return row.changed ? "changed-row" : "";
+}
+</script>
+<style scoped lang="scss">
+.dataset-table {
+  height: 100%;
+  min-height: 260px;
+}
+.ied-table {
+  --el-table-border-color: var(--border-color);
+  --el-table-header-bg-color: var(--table-header-bg);
+  --el-table-tr-bg-color: var(--table-row-bg);
+  --el-table-row-hover-bg-color: var(--table-hover-bg);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+:deep(.el-table__header th) {
+  height: 32px;
+  background: var(--table-header-bg) !important;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+:deep(.el-table__row) {
+  height: 36px;
+}
+:deep(.el-table__cell) {
+  padding: 4px 0;
+}
+:deep(.el-table__body .cell) {
+  font-size: 15px;
+}
+.changed-tag {
+  margin-left: 8px;
+}
+:deep(.changed-row td) {
+  animation: changedFlash 2.2s ease-out;
+}
+@keyframes changedFlash {
+  0%,
+  45% {
+    background: color-mix(
+      in srgb,
+      var(--color-warning) 28%,
+      var(--table-row-bg)
+    );
+  }
+  100% {
+    background: transparent;
+  }
+}
+</style>
