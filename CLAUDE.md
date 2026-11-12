@@ -6,6 +6,7 @@
 - 权威数据源：`main.sql`（qplantagcrtdb 实时库 SQLite 的 Navicat 导出）。
 - 整理文档：`PLC通道点表整理.md`（全部通道总览 + PLC 点表详表 + 疑点清单）。
 - 部署环境：银河麒麟 V10 SP1 虚拟机（部署方法见 kylin-qplantagc-deploy skill）。
+- 仿真工具：`ems_simulate/`（选型已定，见下文开发任务一节）。
 
 ## 通道 / 规约关键事实
 
@@ -48,11 +49,18 @@
 - 收到的遥控/遥设命令单独记录（来源角色、点号、原始值）。
 - 可手动断开/冻结任一角色，配合故障遥信（101 转发主 / 102 采集 / 107 PLC / 108 转发备）验证 qplantagc 的通道故障判别与主备切换。
 
-### 技术约束
+### 技术方案（已定）：基于 ems_simulate，不自研协议栈
 
-- 首选 Python 3 + asyncio 单进程多角色；Modbus 用 pymodbus；IEC 104 可评估 lib60870 绑定，否则自研轻量子集（U/S/I 帧、T1/T2/T3 定时、M_ME_NC / M_SP_NA / C_SC / C_SE / C_IC）。
-- 必须同时在 Windows（本仓库开发机）与麒麟 VM（Linux，Python 3.8+）可运行；依赖少、可离线安装。
-- 配置驱动：地址 / 端口 / ASDU 地址 / 点表全部来自配置文件，初始配置可由 `main.sql` 导出生成，不硬编码。
+- **选型结论**：采用 [ems_simulate](ems_simulate/)（上游 600888/ems_simulate，GPL-3.0，Python 3.11 + FastAPI + Vue3 + SQLite）。代码已克隆到本仓库 `ems_simulate/` 目录。
+- **关键能力（已核实源码）**：
+  - Modbus TCP 服务端：从站 ID 列表可配，功能码按测点配（02/04/05/6），客户端写入有回调日志（`src/device/protocol/modbus_handler.py`）；
+  - IEC 104 服务端/客户端：ASDU 公共地址取测点 `rtu_addr`（可配 257），支持总召/时钟同步，收到的遥控遥调会更新测点并记日志，客户端支持连接即总召 + 周期总召（`src/device/protocol/iec104_handler.py`）；
+  - 数据模拟驱动：不模拟/定值/随机/自增/自减/正弦/斜坡/脉冲，遥信支持随机翻转与脉冲（`src/device/simulator/point_simulator.py`）；
+  - 测点映射 + 公式（跨设备跨协议，`src/data/service/point_mapping_service.py`）：**被映射锁定的测点自动退出模拟**（`is_locked_by_mapping`），正好用于「遥设写入 → 指令反馈遥测」闭环。
+- **运行方式**：Windows 本机运行（qplantagc 在麒麟 VM 上走 TCP 直连它）：`uv sync --extra dev && uv run python start_back_end.py` 起后端；`cd front && npm install && npm run dev` 起前端（Vue Web UI 管设备/测点/模拟）。
+- **点表配置**：用其 Excel 导入功能（模板见 `ems_simulate/data/point_csv/point_sample_modbus.xlsx`、`point_sample_iec104.xlsx`），点表内容从 `main.sql` 的 CHUNNEL_* + *_DATA 表生成。
+- **仍需补的缺口**（在其上二次开发或用 REST/映射组合实现）：时间轴场景脚本、通道故障注入（断开/冻结某设备 + 观察被测端 relate_yx 101/102/107/108）、按"被测端表现"自动判分的验收脚本。
+- **许可注意**：GPL-3.0，二次开发仅限内部测试使用，不得闭源外发。
 
 ### 验收标准（全部以被测端 qplantagc 的表现判分，不以仿真工具自身判分）
 
