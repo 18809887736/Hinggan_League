@@ -44,7 +44,8 @@ class SlaveManager:
         try:
             from src.data.service.slave_service import SlaveService
 
-            if slave_id < 0 or slave_id > 255:
+            # 本地补丁: IEC104 公共地址为 16 位, 放宽到 65534
+            if slave_id < 0 or slave_id > 65534:
                 self._log.error(f"无效的从机地址: {slave_id}")
                 return False
 

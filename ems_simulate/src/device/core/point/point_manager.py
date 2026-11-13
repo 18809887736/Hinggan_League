@@ -67,14 +67,16 @@ class PointManager:
         """
         self._apply_change_tracking(point)
         # 添加到对应的字典
+        # 本地补丁: IEC104 公共地址可达 65534(如 257), 超出预建的 0~255 键,
+        # 改用 setdefault 兼容高位从站/公共地址
         if isinstance(point, Yt):
-            self.yt_dict[slave_id].append(point)
+            self.yt_dict.setdefault(slave_id, []).append(point)
         elif isinstance(point, Yk):
-            self.yk_dict[slave_id].append(point)
+            self.yk_dict.setdefault(slave_id, []).append(point)
         elif isinstance(point, Yc):
-            self.yc_dict[slave_id].append(point)
+            self.yc_dict.setdefault(slave_id, []).append(point)
         elif isinstance(point, Yx):
-            self.yx_dict[slave_id].append(point)
+            self.yx_dict.setdefault(slave_id, []).append(point)
 
         # 更新索引 - 使用复合键避免不同从站同编码覆盖
         if point and point.code:

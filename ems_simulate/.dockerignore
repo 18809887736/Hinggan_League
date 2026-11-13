@@ -1,0 +1,14 @@
+.venv
+data
+node_modules
+front/node_modules
+src-tauri
+debian
+scripts
+plan
+tests
+docs
+resources
+**/__pycache__
+*.log
+.git

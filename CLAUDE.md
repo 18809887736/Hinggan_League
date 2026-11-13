@@ -57,8 +57,19 @@
   - IEC 104 服务端/客户端：ASDU 公共地址取测点 `rtu_addr`（可配 257），支持总召/时钟同步，收到的遥控遥调会更新测点并记日志，客户端支持连接即总召 + 周期总召（`src/device/protocol/iec104_handler.py`）；
   - 数据模拟驱动：不模拟/定值/随机/自增/自减/正弦/斜坡/脉冲，遥信支持随机翻转与脉冲（`src/device/simulator/point_simulator.py`）；
   - 测点映射 + 公式（跨设备跨协议，`src/data/service/point_mapping_service.py`）：**被映射锁定的测点自动退出模拟**（`is_locked_by_mapping`），正好用于「遥设写入 → 指令反馈遥测」闭环。
-- **运行方式**：Windows 本机运行（qplantagc 在麒麟 VM 上走 TCP 直连它）：`uv sync --extra dev && uv run python start_back_end.py` 起后端；`cd front && npm install && npm run dev` 起前端（Vue Web UI 管设备/测点/模拟）。
-- **点表配置**：用其 Excel 导入功能（模板见 `ems_simulate/data/point_csv/point_sample_modbus.xlsx`、`point_sample_iec104.xlsx`），点表内容从 `main.sql` 的 CHUNNEL_* + *_DATA 表生成。
+- **运行方式（2026-11-13 起为 Docker Compose，宿主机零污染）**：部署在 **10.0.0.9 (myubuntu)** 的 `~/hinggan/ems_simulate`（镜像 `ems-simulate:xam`，495MB）。启动/重启：`cd ~/hinggan/ems_simulate && docker compose up -d`（重建：`docker compose build && docker compose up -d`）；日志：`docker logs ems-simulate`；REST/Web UI：`http://10.0.0.9:8991`。端口经 compose 绑定到 `10.0.0.9`（8991/502/2404），容器内 root 直接绑 502，无需宿主机 setcap。宿主机原有部署残留（uv/venv/setcap/apt 编译工具/ufw 放行）已全部清除，仅剩 docker 与项目目录。
+- **镜像构建要点（重建时必读）**：容器内 GitHub 不可达、PyPI 直连也不可达——① `wheels/` 内含宿主机预编译的 `c104-2.2.2-cp312` 与 `pydnp3_pure-0.1.0` wheel（源自 uv git 缓存 checkout，**勿删**，删了且 GitHub 断连时无法重建）；② 其余依赖经清华镜像（Dockerfile `PIP_INDEX_URL`）；③ `requirements-docker.txt` 为冻结清单（c104/pydnp3-pure 除外）。改依赖后需重新生成该清单。健康检查走容器内 `/api/health`。
+- **已建设备（2026-11-12）**：
+
+| 设备 | 角色 | 监听/连接 | 点数 |
+|---|---|---|---|
+| PLC-仿真 (ch1) | Modbus TCP 服务端，从站1 | 0.0.0.0:502 | 16YC+32YX+20YK+4YS |
+| NCS-仿真 (ch2) | IEC104 服务端，CA=257 | 0.0.0.0:2404 | 60YC+11YX |
+| 主站-仿真 (ch3) | IEC104 客户端 | 连 10.0.0.194:2404（待 qplantagc 启动） | 2YC+2YX+1YT(25089) |
+
+冒烟已过：Modbus func4 可读；104 STARTDT/TESTFR/总召正常回 M_ME_NC_1。备通道（ch5）客户端未单独建，需要时用 `/api/channels/copy` 复制 ch3。
+- **本地补丁（3 处，重装/升级 ems_simulate 时需重打）**：① `src/device/core/point/point_manager.py` add_point 改 setdefault（原 `range(256)` 预建键导致 104 公共地址 257 KeyError）；② `src/device/core/slave_manager.py` 与 ③ `src/data/service/slave_service.py` 从站上限 255→65534（104 公共地址是 16 位）。补丁均带「本地补丁」注释。
+- **点表配置**：Excel 由 `sim_config/gen_excel.py` 从 `sim_config/points.json`（`extract_points.py` 从 main.sql 生成）产出，经 `/api/channels/import-points` 导入。Modbus 遥测/遥设解析码暂用 FLOAT32_ABCD，若联调值乱码改 CDAB。
 - **仍需补的缺口**（在其上二次开发或用 REST/映射组合实现）：时间轴场景脚本、通道故障注入（断开/冻结某设备 + 观察被测端 relate_yx 101/102/107/108）、按"被测端表现"自动判分的验收脚本。
 - **许可注意**：GPL-3.0，二次开发仅限内部测试使用，不得闭源外发。
 

@@ -1,0 +1,13 @@
+services:
+  backend:
+    build: .
+    image: ems-simulate:xam
+    container_name: ems-simulate
+    restart: unless-stopped
+    ports:
+      - "10.0.0.9:8991:8991"   # REST / Web API
+      - "10.0.0.9:502:502"     # PLC-仿真 (Modbus TCP 服务端, 从站1)
+      - "10.0.0.9:2404:2404"   # NCS-仿真 (IEC104 服务端, CA=257)
+    volumes:
+      - ./data:/app/data                 # ems.db 设备/点表配置持久化
+      - ./config.ini:/app/config.ini:ro  # 监听配置 (host=0.0.0.0)

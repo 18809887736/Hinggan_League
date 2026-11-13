@@ -28,7 +28,8 @@ class SlaveService:
     @classmethod
     def create_slave(cls, channel_id: int, slave_id: int, name: str | None = None) -> bool:
         """创建从机"""
-        if slave_id < 0 or slave_id > 255:
+        # 本地补丁: IEC104 公共地址为 16 位, 放宽到 65534
+        if slave_id < 0 or slave_id > 65534:
             log.error(f"无效的从机地址: {slave_id}")
             return False
         return SlaveDao.create_slave(channel_id, slave_id, name)
