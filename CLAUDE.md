@@ -7,6 +7,7 @@
 - 整理文档：`PLC通道点表整理.md`（全部通道总览 + PLC 点表详表 + 疑点清单）。
 - 部署环境：银河麒麟 V10 SP1 虚拟机（部署方法见 kylin-qplantagc-deploy skill）。
 - 仿真工具：`ems_simulate/`（选型已定，见下文开发任务一节）。
+- **10.0.0.9 (myubuntu) 操作准则：任何服务部署一律首选 docker compose，宿主机零污染**——数据 bind mount 持久化、端口绑 `10.0.0.9` 发布；不在宿主机装工具链/venv/ufw 规则（Docker 发布端口走 iptables 绕过 ufw）。原生依赖预编译成 wheel 放构建上下文，PyPI 走清华镜像。参考实现：`ems_simulate/Dockerfile` + `docker-compose.yml`。
 
 ## 通道 / 规约关键事实
 
