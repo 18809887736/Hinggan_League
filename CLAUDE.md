@@ -8,6 +8,7 @@
 - 部署环境：银河麒麟 V10 SP1 虚拟机（部署方法见 kylin-qplantagc-deploy skill）。
 - 仿真工具：`ems_simulate/`（选型已定，见下文开发任务一节）。
 - **10.0.0.9 (myubuntu) 操作准则：任何服务部署一律首选 docker compose，宿主机零污染**——数据 bind mount 持久化、端口绑 `10.0.0.9` 发布；不在宿主机装工具链/venv/ufw 规则（Docker 发布端口走 iptables 绕过 ufw）。原生依赖预编译成 wheel 放构建上下文，PyPI 走清华镜像。参考实现：`ems_simulate/Dockerfile` + `docker-compose.yml`。
+- **文本编辑规则：编辑任何含 AVC 字样的文本前，先删除全部"供热"字样**——本项目资料常从热电联产电厂模板拷贝，"供热机组/供热工况"等不适用于兴安盟电厂；新建文本同样不得引入。
 
 ## 通道 / 规约关键事实
 
@@ -66,13 +67,35 @@
 |---|---|---|---|
 | PLC-仿真 (ch1) | Modbus TCP 服务端，从站1 | 0.0.0.0:502 | 16YC+32YX+20YK+4YS |
 | NCS-仿真 (ch2) | IEC104 服务端，CA=257 | 0.0.0.0:2404 | 60YC+11YX |
-| 主站-仿真 (ch3) | IEC104 客户端 | 连 10.0.0.194:2404（待 qplantagc 启动） | 2YC+2YX+1YT(25089) |
+| 主站-仿真 (ch3) | IEC104 客户端 | 连 10.0.0.194:2404（已连通；点 rtu_addr=1 见下联调节） | 2YC+2YX+1YT(25089) |
 
 冒烟已过：Modbus func4 可读；104 STARTDT/TESTFR/总召正常回 M_ME_NC_1。备通道（ch5）客户端未单独建，需要时用 `/api/channels/copy` 复制 ch3。
 - **本地补丁（3 处，重装/升级 ems_simulate 时需重打）**：① `src/device/core/point/point_manager.py` add_point 改 setdefault（原 `range(256)` 预建键导致 104 公共地址 257 KeyError）；② `src/device/core/slave_manager.py` 与 ③ `src/data/service/slave_service.py` 从站上限 255→65534（104 公共地址是 16 位）。补丁均带「本地补丁」注释。
-- **点表配置**：Excel 由 `sim_config/gen_excel.py` 从 `sim_config/points.json`（`extract_points.py` 从 main.sql 生成）产出，经 `/api/channels/import-points` 导入。Modbus 遥测/遥设解析码暂用 FLOAT32_ABCD，若联调值乱码改 CDAB。
+- **点表配置**：Excel 由 `sim_config/gen_excel.py` 从 `sim_config/points.json`（`extract_points.py` 从 main.sql 生成）产出，经 `/api/channels/import-points` 导入。~~Modbus 遥测/遥设解析码暂用 FLOAT32_ABCD~~ → **联调实测：被测端按 1 path = 1 个 INT16 寄存器 × 系数读取，2026-11-13 已全量改为 INT16_AB**（NCS 104 点则须 FLOAT32_ABCD，Excel 类型列留空会默认成 INT32+Random 导致写值被整型化）。API 调试辅助脚本：`sim_config/xamapi.py`（避开 Windows 控制台中文编码坑）。
 - **仍需补的缺口**（在其上二次开发或用 REST/映射组合实现）：时间轴场景脚本、通道故障注入（断开/冻结某设备 + 观察被测端 relate_yx 101/102/107/108）、按"被测端表现"自动判分的验收脚本。
 - **许可注意**：GPL-3.0，二次开发仅限内部测试使用，不得闭源外发。
+
+### 联调进展（2026-11-13 首轮，全部以被测端表现验证）
+
+> 全过程逐步记录（含每个坑的定位与证据帧）见 [联调记录-20261113.md](联调记录-20261113.md)。
+
+**链路状态**：qplantagc 已在麒麟 VM 运行（`/home/syth/QCzt2016/build/qplantagcserver`，VM 重启后需手动拉起，见 kylin skill §8）；PORT_NET 已改指仿真器（改前备份 `qplantagcrtdb.db.bak-20261113`）：ch4→10.0.0.9:502、ch1 主对端→10.0.0.9:2404（ch1 备对端 196.5.1.216 留为不可达）。三条 TCP 全通（104采集/Modbus/主站→2404）。
+
+**验收结果**：
+1. 通道连通：relate_yx **101/102/107=65（正常）**；108=0（备通道 ch5 未建对端，仿真侧复制 ch3 即可补）。被测端「正常」编码=65（bit0=值1 + bit6 标志位）；开关遥信合上也是 65。
+2. 遥测联动：PLC 整型（YC512=200、YC513=-555）、NCS 浮点（yc222=77.7）均精确落入 qplantagcrtdb。**被测端约 40~60s 周期批量落库，update_time 列不写**（判断联调结果勿依赖 update_time）。
+3. 遥设闭环六环全通：主站 YS5 C_SE_NC(25089)→被测端 ACTCON→AGC 计算（yc101=160、yc103=688.7）→Modbus 06 写 path51~54（100/300/700/400）→仿真侧 YS1→YC301 等映射回灌→被测端回读（yc301/303/305/307=100/300/700/400）→转发上行（主站-仿真 YC101=160）。映射已建 4 条（PLC-仿真 内 YS1→YC301、YS4→YC303、YS6→YC305、YS7→YC307，公式=源点名）。
+
+**被测端（DUT）联调实测行为**（仿它、别改它）：
+- qplantagc Modbus 遥测按 **INT16/path** 读（系数 1.0）；遥设 06 单寄存器写。
+- qplantagc ch0（转发）**上送 ASDU CA=1**（rtu_addr 257 只取高字节的味道），但对**收到的命令 CA 完全不校验**（CA 0/1/256/257 的总召与遥设都应答）。主站-仿真 5 个点的 rtu_addr 已改成 **1**（原 257 收不到上行）。
+- NCS-仿真（服务端）CA=257 正常，被测端采集无碍。
+- YS_DATA.YsValue 不落库（一直 0），遥设收到与否看 ACTCON 报文与 06 写。
+- AGC 输出（06 写的值）**不跟随 ys5 设定值**：投入条件未满足（AGC_PARA.AGCStatusYxNum=3，yx3「AGC允许投入远方调节」=0；机组开关已合上仍不跟随）。每个 C_SE 会触发一轮 06 写（约 100s 延迟），值恒为 100/300/700/400（疑似默认/计划值）。
+
+**仿真侧联调必做配置**（都持久化在仿真器库里，重建设备后要重做）：① 主站-仿真开 auto-read（`xamapi.py autoread master`，batch 模式）否则收不到上行值；② 主站收到值靠总召唤（`xamapi.py gi master` 或把通道 general_interrogation_interval_s 设周期）；③ C_SE 数值有 ~0.07% 系数往返误差（300→299.93，系数 0.171 双向换算所致）。
+
+**下一步联调项**：① AGC 投入路径（yx3 怎么变 1：HMI？遥控？查 GENERATOR_AGC_LOCK* 表）→ 验证 06 写值跟随 ys5；② 建 ch5 备通道客户端验证 108 与主备互斥切换；③ 反馈映射改斜坡（机组调节速度爬坡）替代直通；④ 故障注入（断开 PLC-仿真 看 107 变 0）。
 
 ### 验收标准（全部以被测端 qplantagc 的表现判分，不以仿真工具自身判分）
 
