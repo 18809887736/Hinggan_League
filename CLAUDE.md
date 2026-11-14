@@ -77,7 +77,7 @@
 
 ### 联调进展（2026-11-13 首轮，全部以被测端表现验证）
 
-> 全过程逐步记录（含每个坑的定位与证据帧）见 [联调记录-20261113.md](联调记录-20261113.md)。2026-11-14 实时库落库冻结排查（yc512=456 不落库 → 实时库写线程冻死 → 重启解冻）+ hisdb 字符集修复（DSN `Charset=utf8mb4` + 七表转 utf8mb4，中文告警恢复落库）见 [联调记录-20261114.md](联调记录-20261114.md)。⚠ 实时库写链路会静默冻死（改值后 >60s 不落库即疑）；⚠ 被测端 kill 后必须静置 ≥60s 再启动（紧跟 kill 启动会卡死 installTranslator），nohup 必须带 `< /dev/null`，详见记录与 memory kylin-qplantagc-runtime。
+> 全过程逐步记录（含每个坑的定位与证据帧）见 [联调记录-20261113.md](联调记录-20261113.md)。2026-11-14 实时库落库冻结排查（yc512=456 不落库 → 实时库写线程冻死 → 重启解冻）+ hisdb 字符集修复（DSN `Charset=utf8mb4` + 七表及库默认转 utf8mb4，中文告警恢复落库；重建库一律用 `李浩/qplantagchisdb_mysql_utf8mb4.sql`，gbk 旧版勿用）见 [联调记录-20261114.md](联调记录-20261114.md)。⚠ 实时库写链路会静默冻死（改值后 >60s 不落库即疑）；⚠ 被测端 kill 后必须静置 ≥60s 再启动（紧跟 kill 启动会卡死 installTranslator），nohup 必须带 `< /dev/null`，详见记录与 memory kylin-qplantagc-runtime。
 
 **链路状态**：qplantagc 已在麒麟 VM 运行（`/home/syth/QCzt2016/build/qplantagcserver`，VM 重启后需手动拉起，见 kylin skill §8）；PORT_NET 已改指仿真器（改前备份 `qplantagcrtdb.db.bak-20261113`）：ch4→10.0.0.9:502、ch1 主对端→10.0.0.9:2404（ch1 备对端 196.5.1.216 留为不可达）。三条 TCP 全通（104采集/Modbus/主站→2404）。
 
