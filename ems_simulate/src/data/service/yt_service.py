@@ -122,6 +122,8 @@ class YtService:
                 frame_type=3,
                 iec_type_id=iec_type_id,
                 iec_quality=iec_quality,
+                # 本地补丁4: 同 yc_service，104 遥调点按库中 decode 构建
+                decode=item.get("decode_code") or "FLOAT32_ABCD",
             )
 
         elif protocol_type in [ProtocolType.Iec61850Server, ProtocolType.Iec61850Client]:

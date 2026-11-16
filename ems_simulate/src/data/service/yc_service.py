@@ -121,6 +121,8 @@ class YcService:
                 frame_type=0,
                 iec_type_id=iec_type_id,
                 iec_quality=iec_quality,
+                # 本地补丁4: 104 点按库中 decode 构建（原代码漏传导致运行时恒为 INT32_ABCD，小数被整型化）
+                decode=item.get("decode_code") or "FLOAT32_ABCD",
             )
 
         elif protocol_type in [ProtocolType.Iec61850Server, ProtocolType.Iec61850Client]:

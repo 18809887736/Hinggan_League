@@ -59,7 +59,7 @@
   - IEC 104 服务端/客户端：ASDU 公共地址取测点 `rtu_addr`（可配 257），支持总召/时钟同步，收到的遥控遥调会更新测点并记日志，客户端支持连接即总召 + 周期总召（`src/device/protocol/iec104_handler.py`）；
   - 数据模拟驱动：不模拟/定值/随机/自增/自减/正弦/斜坡/脉冲，遥信支持随机翻转与脉冲（`src/device/simulator/point_simulator.py`）；
   - 测点映射 + 公式（跨设备跨协议，`src/data/service/point_mapping_service.py`）：**被映射锁定的测点自动退出模拟**（`is_locked_by_mapping`），正好用于「遥设写入 → 指令反馈遥测」闭环。
-- **运行方式（2026-11-13 起为 Docker Compose，宿主机零污染）**：部署在 **10.0.0.9 (myubuntu)** 的 `~/hinggan/ems_simulate`（镜像 `ems-simulate:xam`，495MB）。启动/重启：`cd ~/hinggan/ems_simulate && docker compose up -d`（重建：`docker compose build && docker compose up -d`）；日志：`docker logs ems-simulate`；REST/Web UI：`http://10.0.0.9:8991`。端口经 compose 绑定到 `10.0.0.9`（8991/502/2404），容器内 root 直接绑 502，无需宿主机 setcap。宿主机原有部署残留（uv/venv/setcap/apt 编译工具/ufw 放行）已全部清除，仅剩 docker 与项目目录。
+- **运行方式（2026-11-13 起为 Docker Compose，宿主机零污染；2026-11-16 起数据库已切 MySQL）**：部署在 **10.0.0.9 (myubuntu)** 的 `~/hinggan/ems_simulate`（镜像 `ems-simulate:xam`，495MB）。**数据库：10.0.0.9 docker 容器 `mysql84`（mysql:8.4.11，3306，root/syth7777，库名 net）**——部署机 config.ini 已改 `type=mysql`（config.ini 为挂载文件，改后 restart 容器生效；容器重启后设备不自动 start，需逐个 `/api/devices/start`；SQLite `data/ems.db` 退役保留备份 bak-mysql-20261116；`channels/update` 的 enable 字段不落库，禁用通道直接 SQL 改 `net.channel`）。启动/重启：`cd ~/hinggan/ems_simulate && docker compose up -d`（重建：`docker compose build && docker compose up -d`）；日志：`docker logs ems-simulate`；REST/Web UI：`http://10.0.0.9:8991`。端口经 compose 绑定到 `10.0.0.9`（8991/502/2404），容器内 root 直接绑 502，无需宿主机 setcap。宿主机原有部署残留（uv/venv/setcap/apt 编译工具/ufw 放行）已全部清除，仅剩 docker 与项目目录。
 - **镜像构建要点（重建时必读）**：容器内 GitHub 不可达、PyPI 直连也不可达——① `wheels/` 内含宿主机预编译的 `c104-2.2.2-cp312` 与 `pydnp3_pure-0.1.0` wheel（源自 uv git 缓存 checkout，**勿删**，删了且 GitHub 断连时无法重建）；② 其余依赖经清华镜像（Dockerfile `PIP_INDEX_URL`）；③ `requirements-docker.txt` 为冻结清单（c104/pydnp3-pure 除外）。改依赖后需重新生成该清单。健康检查走容器内 `/api/health`。
 - **已建设备（2026-11-12）**：
 
@@ -70,7 +70,7 @@
 | 主站-仿真 (ch3) | IEC104 客户端 | 连 10.0.0.194:2404（已连通；点 rtu_addr=1 见下联调节） | 2YC+2YX+1YT(25089) |
 
 冒烟已过：Modbus func4 可读；104 STARTDT/TESTFR/总召正常回 M_ME_NC_1。备通道（ch5）客户端未单独建，需要时用 `/api/channels/copy` 复制 ch3。
-- **本地补丁（3 处，重装/升级 ems_simulate 时需重打）**：① `src/device/core/point/point_manager.py` add_point 改 setdefault（原 `range(256)` 预建键导致 104 公共地址 257 KeyError）；② `src/device/core/slave_manager.py` 与 ③ `src/data/service/slave_service.py` 从站上限 255→65534（104 公共地址是 16 位）。补丁均带「本地补丁」注释。
+- **本地补丁（4 处，重装/升级 ems_simulate 时需重打）**：① `src/device/core/point/point_manager.py` add_point 改 setdefault（原 `range(256)` 预建键导致 104 公共地址 257 KeyError）；② `src/device/core/slave_manager.py` 与 ③ `src/data/service/slave_service.py` 从站上限 255→65534（104 公共地址是 16 位）；④ `src/data/service/yc_service.py` 与 `yt_service.py` 的 **IEC104 分支构造点对象时漏传 `decode`**——运行时 104 遥测/遥调点恒为默认 INT32_ABCD，**一切小数写值被整型化**（123.456→123.0），已补 `decode=item.get("decode_code") or "FLOAT32_ABCD"`（仓库源码已同步，容器内热修过，2026-11-16；另需给 `net.point_yc/point_yt` 的 104 点补 `iec_type_id`：yc=M_ME_NC_1、主站 yt=C_SE_NC_1，迁移/导入后执行一次）。补丁均带「本地补丁」注释。
 - **点表配置**：Excel 由 `sim_config/gen_excel.py` 从 `sim_config/points.json`（`extract_points.py` 从 main.sql 生成）产出，经 `/api/channels/import-points` 导入。~~Modbus 遥测/遥设解析码暂用 FLOAT32_ABCD~~ → **联调实测：被测端按 1 path = 1 个 INT16 寄存器 × 系数读取，2026-11-13 已全量改为 INT16_AB**（NCS 104 点则须 FLOAT32_ABCD，Excel 类型列留空会默认成 INT32+Random 导致写值被整型化）。API 调试辅助脚本：`sim_config/xamapi.py`（避开 Windows 控制台中文编码坑）。
 - **仍需补的缺口**（在其上二次开发或用 REST/映射组合实现）：时间轴场景脚本、通道故障注入（断开/冻结某设备 + 观察被测端 relate_yx 101/102/107/108）、按"被测端表现"自动判分的验收脚本。
 - **许可注意**：GPL-3.0，二次开发仅限内部测试使用，不得闭源外发。
