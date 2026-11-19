@@ -1,0 +1,328 @@
+{
+ "points": {
+  "YC502": {
+   "device": "NCS-仿真",
+   "base": 50.0,
+   "amp": 0.03,
+   "on": true
+  },
+  "YC602": {
+   "device": "NCS-仿真",
+   "base": 50.0,
+   "amp": 0.03,
+   "on": true
+  },
+  "YC902": {
+   "device": "NCS-仿真",
+   "base": 50.0,
+   "amp": 0.03,
+   "on": true
+  },
+  "YC1002": {
+   "device": "NCS-仿真",
+   "base": 50.0,
+   "amp": 0.03,
+   "on": true
+  },
+  "YC225": {
+   "device": "NCS-仿真",
+   "base": 50.0,
+   "amp": 0.03,
+   "on": true
+  },
+  "YC238": {
+   "device": "NCS-仿真",
+   "base": 50.0,
+   "amp": 0.03,
+   "on": true
+  },
+  "YC503": {
+   "device": "NCS-仿真",
+   "base": 4.5,
+   "amp": 0.2,
+   "on": true
+  },
+  "YC903": {
+   "device": "NCS-仿真",
+   "base": 4.5,
+   "amp": 0.2,
+   "on": true
+  },
+  "YC603": {
+   "device": "NCS-仿真",
+   "base": 11.25,
+   "amp": 0.3,
+   "on": true
+  },
+  "YC1003": {
+   "device": "NCS-仿真",
+   "base": 11.25,
+   "amp": 0.3,
+   "on": true
+  },
+  "YC223": {
+   "device": "NCS-仿真",
+   "base": 4.5,
+   "amp": 0.2,
+   "on": true
+  },
+  "YC236": {
+   "device": "NCS-仿真",
+   "base": 11.25,
+   "amp": 0.3,
+   "on": true
+  },
+  "YC504": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC505": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC506": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC604": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC605": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC606": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC904": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC905": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC906": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC1004": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC1005": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC1006": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC219": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC220": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC221": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC232": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC233": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC234": {
+   "device": "NCS-仿真",
+   "base": 10.5,
+   "amp": 0.08,
+   "on": true
+  },
+  "YC507": {
+   "device": "NCS-仿真",
+   "base": 412.4,
+   "amp": 3.0,
+   "on": true
+  },
+  "YC508": {
+   "device": "NCS-仿真",
+   "base": 412.4,
+   "amp": 3.0,
+   "on": true
+  },
+  "YC509": {
+   "device": "NCS-仿真",
+   "base": 412.4,
+   "amp": 3.0,
+   "on": true
+  },
+  "YC216": {
+   "device": "NCS-仿真",
+   "base": 412.4,
+   "amp": 3.0,
+   "on": true
+  },
+  "YC217": {
+   "device": "NCS-仿真",
+   "base": 412.4,
+   "amp": 3.0,
+   "on": true
+  },
+  "YC218": {
+   "device": "NCS-仿真",
+   "base": 412.4,
+   "amp": 3.0,
+   "on": true
+  },
+  "YC607": {
+   "device": "NCS-仿真",
+   "base": 1031.1,
+   "amp": 8.0,
+   "on": true
+  },
+  "YC608": {
+   "device": "NCS-仿真",
+   "base": 1031.1,
+   "amp": 8.0,
+   "on": true
+  },
+  "YC609": {
+   "device": "NCS-仿真",
+   "base": 1031.1,
+   "amp": 8.0,
+   "on": true
+  },
+  "YC229": {
+   "device": "NCS-仿真",
+   "base": 1031.1,
+   "amp": 8.0,
+   "on": true
+  },
+  "YC230": {
+   "device": "NCS-仿真",
+   "base": 1031.1,
+   "amp": 8.0,
+   "on": true
+  },
+  "YC231": {
+   "device": "NCS-仿真",
+   "base": 1031.1,
+   "amp": 8.0,
+   "on": true
+  },
+  "YC515": {
+   "device": "NCS-仿真",
+   "base": 0.8,
+   "amp": 0.008,
+   "on": true
+  },
+  "YC615": {
+   "device": "NCS-仿真",
+   "base": 0.8,
+   "amp": 0.008,
+   "on": true
+  },
+  "YC915": {
+   "device": "NCS-仿真",
+   "base": 0.8,
+   "amp": 0.008,
+   "on": true
+  },
+  "YC1015": {
+   "device": "NCS-仿真",
+   "base": 0.8,
+   "amp": 0.008,
+   "on": true
+  },
+  "YC224": {
+   "device": "NCS-仿真",
+   "base": 0.8,
+   "amp": 0.008,
+   "on": true
+  },
+  "YC237": {
+   "device": "NCS-仿真",
+   "base": 0.8,
+   "amp": 0.008,
+   "on": true
+  },
+  "YC907": {
+   "device": "NCS-仿真",
+   "base": 412.4,
+   "amp": 3.0,
+   "on": true
+  },
+  "YC908": {
+   "device": "NCS-仿真",
+   "base": 412.4,
+   "amp": 3.0,
+   "on": true
+  },
+  "YC909": {
+   "device": "NCS-仿真",
+   "base": 412.4,
+   "amp": 3.0,
+   "on": true
+  },
+  "YC1007": {
+   "device": "NCS-仿真",
+   "base": 1031.1,
+   "amp": 8.0,
+   "on": true
+  },
+  "YC1008": {
+   "device": "NCS-仿真",
+   "base": 1031.1,
+   "amp": 8.0,
+   "on": true
+  },
+  "YC1009": {
+   "device": "NCS-仿真",
+   "base": 1031.1,
+   "amp": 8.0,
+   "on": true
+  }
+ }
+}
