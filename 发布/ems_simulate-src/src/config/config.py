@@ -1,0 +1,98 @@
+"""
+配置加载模块
+支持从 config.ini 加载数据库和数据源配置
+"""
+
+from configparser import ConfigParser
+import os
+from pathlib import Path
+
+from src.enums.data_source import DataSource
+
+
+def resolve_config_path(root_dir: str | os.PathLike[str]) -> Path:
+    """Resolve the editable runtime config, with the old ``etc`` path as fallback."""
+    root = Path(root_dir)
+    primary = root / "config.ini"
+    legacy = root / "etc" / "config.ini"
+    if primary.is_file() or not legacy.is_file():
+        return primary
+    return legacy
+
+
+class Config:
+    """全局配置类"""
+
+    # 数据库类型配置
+    db_type: str = "sqlite"  # sqlite 或 mysql
+    sqlite_path: str = "data/ems.db"
+
+    # MySQL 配置
+    host: str = "127.0.0.1"
+    port: str = "3306"
+    username: str = "nandu"
+    password: str = "nandu123"
+    database: str = "net"
+
+    # 默认协议配置
+    DEFAULT_PORT: int = 502
+    IEC104_DEFAULT_PORT: int = 2404
+    DLT645_DEFAULT_PORT: int = 8899
+    DNP3_DEFAULT_PORT: int = 20000
+    DEFAULT_IP: str = "0.0.0.0"
+
+    # 数据源配置
+    data_source: DataSource = DataSource.Db
+
+    # Web服务配置
+    web_host: str = "127.0.0.1"  # 服务监听地址，默认仅本机访问
+    web_port: int = 8991
+
+    @classmethod
+    def load_config(cls, config_file: str) -> None:
+        """加载配置文件并更新配置类属性
+
+        Args:
+            config_file: 配置文件路径
+        """
+        try:
+            config = ConfigParser()
+            if os.path.exists(config_file):
+                config.read(config_file, encoding="utf8")
+
+                # 数据库类型配置
+                if "database" in config:
+                    cls.db_type = config["database"].get("type", cls.db_type)
+                    cls.sqlite_path = config["database"].get("sqlite_path", cls.sqlite_path)
+
+                # MySQL 配置
+                if "mysql" in config:
+                    cls.host = config["mysql"].get("host", cls.host)
+                    cls.port = config["mysql"].get("port", cls.port)
+                    cls.username = config["mysql"].get("username", cls.username)
+                    cls.password = config["mysql"].get("password", cls.password)
+                    cls.database = config["mysql"].get("database", cls.database)
+
+                # 数据源配置
+                if "data_source" in config and "type" in config["data_source"]:
+                    data_source = config["data_source"]["type"]
+                    cls.data_source = DataSource.Db if data_source == "db" else DataSource.CSV
+
+                # Server 配置
+                if "server" in config:
+                    cls.web_host = config["server"].get("host", cls.web_host)
+                    cls.web_port = int(config["server"].get("port", cls.web_port))
+            else:
+                print(f"Warning: Config file {config_file} not found, using defaults")
+        except Exception as e:
+            print(f"Error loading config: {str(e)}")
+
+    @classmethod
+    def is_sqlite(cls) -> bool:
+        """判断是否使用 SQLite"""
+        return cls.db_type.lower() == "sqlite"
+
+    @classmethod
+    def is_mysql(cls) -> bool:
+        """判断是否使用 MySQL"""
+        return cls.db_type.lower() == "mysql"

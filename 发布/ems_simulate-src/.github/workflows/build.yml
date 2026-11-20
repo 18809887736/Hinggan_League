@@ -1,0 +1,451 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================
+  # Job 1: Version — 从 tag 提取版本号，供下游 job 使用
+  # ============================================================
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.extract.outputs.release_tag }}
+      release_version: ${{ steps.extract.outputs.release_version }}
+
+    steps:
+      - name: Extract version from tag
+        id: extract
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must match vMAJOR.MINOR.PATCH, got: $tag"
+            exit 1
+          fi
+          version="${tag#v}"
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_version=$version" >> "$GITHUB_OUTPUT"
+          echo "Tag: $tag, Version: $version"
+
+  # ============================================================
+  # Job 2: Build — Matrix 并行构建 3 个平台
+  # ============================================================
+  build:
+    needs: version
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows
+            os: windows-2022
+            build_script: .\scripts\build_tauri_windows.ps1
+            venv_activate: .venv\Scripts\Activate.ps1
+            needs_rust: true
+            needs_tauri_deps: false
+
+          - target: linux-web
+            os: ubuntu-22.04
+            build_script: ./scripts/build_web_deb.sh
+            venv_activate: source .venv/bin/activate
+            needs_rust: false
+            needs_tauri_deps: false
+
+          - target: linux-tauri
+            os: ubuntu-22.04
+            build_script: ./scripts/build_tauri_linux.sh
+            venv_activate: source .venv/bin/activate
+            needs_rust: true
+            needs_tauri_deps: true
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # --- 通用环境配置 ---
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Configure short uv cache path
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+
+          # c104's vendored native sources create deep object paths on Windows.
+          # RUNNER_TEMP is both ASCII-only and shorter than github.workspace.
+          cache_dir = Path(os.environ["RUNNER_TEMP"]) / "uv-cache"
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"UV_CACHE_DIR={cache_dir}\n")
+
+      - name: Install c104 build toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.9.18"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked Python dependencies
+        env:
+          # c104's setup.py treats a truthy DEBUG value as a CMake Debug build.
+          # Never allow runner or cache environment state to enable DWARF data
+          # in release artifacts.
+          DEBUG: "0"
+        run: uv sync --frozen --extra build --extra dev
+
+      - name: Verify c104 2.2.2 TLS API
+        run: >-
+          uv run --no-sync python -c "import importlib.metadata, c104;
+          assert importlib.metadata.version('c104') == '2.2.2';
+          assert hasattr(c104.TransportSecurity(), 'set_hostname_verification')"
+
+      - name: Install frontend dependencies
+        working-directory: front
+        run: npm ci
+
+      # --- 版本同步（需在 Python 环境就绪后执行） ---
+      - name: Sync release version to build metadata (Windows)
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          $version = "${{ needs.version.outputs.release_version }}"
+          $path = "pyproject.toml"
+          $content = Get-Content -Path $path -Raw -Encoding UTF8
+          $pattern = '(?m)^version\s*=\s*"[^"]+"'
+          if (-not [regex]::IsMatch($content, $pattern)) {
+            Write-Error "Cannot find version line in pyproject.toml"
+            exit 1
+          }
+          $newContent = [regex]::Replace($content, $pattern, "version = `"$version`"", 1)
+          Set-Content -Path $path -Value $newContent -Encoding UTF8
+          python scripts/sync_version.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Sync release version to build metadata (Linux)
+        if: matrix.target != 'windows'
+        run: |
+          version="${{ needs.version.outputs.release_version }}"
+          sed -i "s/^version = \".*\"/version = \"${version}\"/" pyproject.toml
+          source .venv/bin/activate
+          python scripts/sync_version.py
+
+      # --- Rust 缓存（仅需要 Rust 的平台） ---
+      - name: Setup Rust cache
+        if: matrix.needs_rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> src-tauri/target
+
+      # --- Tauri 系统依赖（仅 linux-tauri） ---
+      - name: Install Tauri system dependencies
+        if: matrix.needs_tauri_deps
+        run: |
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libgdk-pixbuf2.0-dev \
+            libpango1.0-dev \
+            libatk1.0-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            patchelf \
+            squashfs-tools \
+            pkg-config
+
+      # --- 构建 ---
+      - name: Make build scripts executable (Linux)
+        if: matrix.target != 'windows'
+        run: chmod +x scripts/*.sh
+
+      - name: IEC 61850 modeling regression gate
+        run: uv run --no-sync pytest tests/services/modeling -q
+
+      - name: Build ${{ matrix.target }}
+        run: |
+          ${{ matrix.venv_activate }}
+          ${{ matrix.build_script }}
+
+      # --- 产物上传 ---
+      - name: Upload build artifacts (Windows)
+        if: matrix.target == 'windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ems-simulate-windows-${{ needs.version.outputs.release_tag }}
+          path: src-tauri/target/release/bundle/msi/*${{ needs.version.outputs.release_version }}*.msi
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload build artifacts (Linux Web)
+        if: matrix.target == 'linux-web'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ems-simulate-linux-web-${{ needs.version.outputs.release_tag }}
+          path: build/dist_deb/*.deb
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload build artifacts (Linux AppImage)
+        if: matrix.target == 'linux-tauri'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ems-simulate-linux-appimage-${{ needs.version.outputs.release_tag }}
+          path: src-tauri/target/release/bundle/appimage/*${{ needs.version.outputs.release_version }}*.AppImage
+          compression-level: 0
+          if-no-files-found: error
+
+  # ============================================================
+  # Job 3: ARM64 Deb — 在 Ubuntu 20.04 容器内原生构建，保持 glibc 2.31 兼容基线
+  # ============================================================
+  build-arm64:
+    needs: version
+    uses: ./.github/workflows/build-arm64.yml
+    with:
+      release_version: ${{ needs.version.outputs.release_version }}
+
+  # ============================================================
+  # Job 4: Release — 收集所有平台产物并发布到 GitHub Release
+  # ============================================================
+  release:
+    runs-on: ubuntu-latest
+    needs: [version, build, build-arm64]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_tag="${{ needs.version.outputs.release_tag }}"
+          git fetch --tags --force
+
+          previous_tag="$(git tag --sort=-version:refname | grep -E '^v[0-9]+(\.[0-9]+){1,2}$' | grep -vFx "$current_tag" | head -n 1 || true)"
+          if [ -n "$previous_tag" ]; then
+            commit_range="${previous_tag}..${GITHUB_SHA}"
+            range_label="Changes since ${previous_tag}"
+          else
+            commit_range="${GITHUB_SHA}"
+            range_label="Initial release"
+          fi
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "$workdir"' EXIT
+
+          for section in breaking feat fix perf refactor docs build ci test chore other; do
+            : > "$workdir/$section.md"
+          done
+
+          cc_header_re='^[A-Za-z]+(\([^)]+\))?(!)?[:：][[:space:]]*.+$'
+          cc_full_re='^([A-Za-z]+)(\(([^)]+)\))?(!)?[:：][[:space:]]*(.+)$'
+
+          trim() {
+            sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<< "$1"
+          }
+
+          escape_md() {
+            local value="$1"
+            value="${value//\`/\\\`}"
+            printf '%s' "$value"
+          }
+
+          clean_line() {
+            local value
+            value="$(trim "$1")"
+            value="$(sed -E 's/^```[[:alnum:]_-]*[[:space:]]*//' <<< "$value")"
+            value="$(sed -E 's/[[:space:]]*```$//' <<< "$value")"
+            value="$(sed -E 's/^([-*+]|[0-9]+\.)[[:space:]]+//' <<< "$value")"
+            trim "$value"
+          }
+
+          format_body() {
+            local body="$1"
+            local line cleaned
+
+            while IFS= read -r line; do
+              cleaned="$(clean_line "$line")"
+              [ -z "$cleaned" ] && continue
+              [[ "$cleaned" == \`\`\`* ]] && continue
+              printf '  - %s\n' "$(escape_md "$cleaned")"
+            done <<< "$body"
+          }
+
+          write_entry() {
+            local file="$1"
+            local scope="$2"
+            local description="$3"
+            local short_sha="$4"
+            local body="$5"
+
+            if [ -n "$scope" ]; then
+              printf -- '- **%s**: %s (`%s`)\n' "$(escape_md "$scope")" "$(escape_md "$description")" "$short_sha" >> "$file"
+            else
+              printf -- '- %s (`%s`)\n' "$(escape_md "$description")" "$short_sha" >> "$file"
+            fi
+
+            format_body "$body" >> "$file"
+          }
+
+          parse_commit() {
+            local short_sha="$1"
+            local subject="$2"
+            local body="$3"
+            local parsed_subject type scope description bang target_file promoted line remaining_body
+
+            parsed_subject="$(clean_line "$subject")"
+            remaining_body="$body"
+
+            if ! [[ "$parsed_subject" =~ $cc_header_re ]]; then
+              promoted=""
+              remaining_body=""
+              while IFS= read -r line; do
+                line="$(clean_line "$line")"
+                [ -z "$line" ] && continue
+                if [ -z "$promoted" ] && [[ "$line" =~ $cc_header_re ]]; then
+                  promoted="$line"
+                  continue
+                fi
+                remaining_body+="$line"$'\n'
+              done <<< "$body"
+
+              if [ -n "$promoted" ]; then
+                parsed_subject="$promoted"
+              fi
+            fi
+
+            if [[ "$parsed_subject" =~ $cc_full_re ]]; then
+              type="$(tr '[:upper:]' '[:lower:]' <<< "${BASH_REMATCH[1]}")"
+              scope="${BASH_REMATCH[3]:-}"
+              bang="${BASH_REMATCH[4]:-}"
+              description="${BASH_REMATCH[5]}"
+
+              case "$type" in
+                feat) target_file="$workdir/feat.md" ;;
+                fix) target_file="$workdir/fix.md" ;;
+                perf) target_file="$workdir/perf.md" ;;
+                refactor) target_file="$workdir/refactor.md" ;;
+                docs) target_file="$workdir/docs.md" ;;
+                build) target_file="$workdir/build.md" ;;
+                ci) target_file="$workdir/ci.md" ;;
+                test) target_file="$workdir/test.md" ;;
+                chore|style) target_file="$workdir/chore.md" ;;
+                *) target_file="$workdir/other.md" ;;
+              esac
+
+              if [ "$bang" = "!" ] || grep -qiE '^BREAKING CHANGE:' <<< "$remaining_body"; then
+                write_entry "$workdir/breaking.md" "$scope" "$description" "$short_sha" "$remaining_body"
+              else
+                write_entry "$target_file" "$scope" "$description" "$short_sha" "$remaining_body"
+              fi
+            else
+              parsed_subject="$(clean_line "$subject")"
+              [ -z "$parsed_subject" ] && parsed_subject="No subject"
+              write_entry "$workdir/other.md" "" "$parsed_subject" "$short_sha" "$body"
+            fi
+          }
+
+          while IFS= read -r -d $'\x1e' record; do
+            [ -z "$record" ] && continue
+
+            sha="${record%%$'\x1f'*}"
+            rest="${record#*$'\x1f'}"
+            short_sha="${rest%%$'\x1f'*}"
+            rest="${rest#*$'\x1f'}"
+            subject="${rest%%$'\x1f'*}"
+            body="${rest#*$'\x1f'}"
+
+            parse_commit "$short_sha" "$subject" "$body"
+          done < <(git log "$commit_range" --no-merges --pretty=format:'%H%x1f%h%x1f%s%x1f%b%x1e')
+
+          notes_file="release-notes.md"
+          {
+            printf '## %s\n\n' "$current_tag"
+            printf '%s.\n\n' "$range_label"
+          } > "$notes_file"
+
+          add_section() {
+            local file="$1"
+            local title="$2"
+
+            if [ -s "$file" ]; then
+              printf '### %s\n\n' "$title" >> "$notes_file"
+              cat "$file" >> "$notes_file"
+              printf '\n' >> "$notes_file"
+            fi
+          }
+
+          add_section "$workdir/breaking.md" "💥 Breaking Changes"
+          add_section "$workdir/feat.md" "✨ 新功能"
+          add_section "$workdir/fix.md" "🐛 Bug 修复"
+          add_section "$workdir/perf.md" "⚡ 性能优化"
+          add_section "$workdir/refactor.md" "♻️ 代码重构"
+          add_section "$workdir/docs.md" "📝 文档更新"
+          add_section "$workdir/build.md" "📦 构建相关"
+          add_section "$workdir/ci.md" "👷 CI 配置"
+          add_section "$workdir/test.md" "✅ 测试"
+          add_section "$workdir/chore.md" "🔧 杂项"
+          add_section "$workdir/other.md" "其他变更"
+
+          if ! grep -q '^### ' "$notes_file"; then
+            printf 'No commit changes found for this release.\n' >> "$notes_file"
+          fi
+
+          printf 'notes_file=%s\n' "$notes_file" >> "$GITHUB_OUTPUT"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ems-simulate-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.version.outputs.release_tag }}
+          name: EMS Simulate ${{ needs.version.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          overwrite_files: true
+          body_path: ${{ steps.changelog.outputs.notes_file }}
+          files: |
+            release-assets/**/*${{ needs.version.outputs.release_version }}*.msi
+            release-assets/**/ems-simulate-web_${{ needs.version.outputs.release_version }}_amd64.deb
+            release-assets/**/ems-simulate-web_${{ needs.version.outputs.release_version }}_arm64.deb
+            release-assets/**/*${{ needs.version.outputs.release_version }}*.AppImage
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

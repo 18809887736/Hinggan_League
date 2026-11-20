@@ -1,0 +1,117 @@
+"""
+数据测点类模块（向后兼容）
+此文件保持向后兼容，实际实现已迁移到 src.enums.points 模块
+
+Classes:
+    - DeviceType: 设备类型枚举
+    - SimulateMethod: 模拟方法枚举
+    - Yc: 遥测类（从 points.yc 导入）
+    - Yx: 遥信类（从 points.yx 导入）
+    - Yt: 遥调类（从 points.yt 导入）
+    - Yk: 遥控类（从 points.yk 导入）
+    - BasePoint: 测点基类（从 points.base_point 导入）
+"""
+
+from enum import Enum
+
+
+class DeviceType(Enum):
+    Pcs = 0
+    Bms = 1
+    ElectricityMeter = 2
+    GridMeter = 3
+    CircuitBreaker = 4
+    Other = 5
+
+
+class SimulateMethod(Enum):
+    NoSimulation = "None"  # 不模拟（监视用，值保持不变）
+    FixedValue = "FixedValue"  # 定值模拟
+    Random = "Random"  # 随机模拟
+    AutoIncrement = "AutoIncrement"  # 自增模拟
+    AutoDecrement = "AutoDecrement"  # 自减模拟
+    Plan = "Plan"  # 计划模拟
+    SineWave = "SineWave"  # 正弦波模拟
+    Ramp = "Ramp"  # 斜坡模拟
+    Pulse = "Pulse"  # 脉冲模拟
+
+
+# 从新模块导入测点类（向后兼容）
+from src.enums.points.base_point import BasePoint, decimal_to_hex_formatted
+from src.enums.points.iec104_type import (
+    IEC104_DEFAULT_TYPE,
+    IEC104_TYPE_REGISTRY,
+    IEC104Type,
+    IEC104TypeInfo,
+    IEC104ValueType,
+    decode_iec104_value,
+    encode_iec104_value,
+    get_default_iec104_type,
+    get_iec104_type_info,
+    get_iec104_types_by_frame_type,
+    is_double_point_type,
+    is_normalized_type,
+    is_scaled_type,
+    is_short_float_type,
+    is_step_type,
+    resolve_iec104_type,
+)
+from src.enums.points.protocol_config import (
+    DLT645Config,
+    IEC104Config,
+    IEC61850Config,
+    ModbusConfig,
+    create_protocol_config,
+    get_default_protocol_config,
+)
+from src.enums.points.protocol_strategy import (
+    DLT645Strategy,
+    IEC104Strategy,
+    IEC61850Strategy,
+    ModbusStrategy,
+    ProtocolStrategy,
+    get_protocol_strategy,
+)
+from src.enums.points.yc import Yc
+from src.enums.points.yk import Yk
+from src.enums.points.yt import Yt
+from src.enums.points.yx import Yx
+
+__all__ = [
+    "DeviceType",
+    "SimulateMethod",
+    "BasePoint",
+    "Yc",
+    "Yx",
+    "Yt",
+    "Yk",
+    "ProtocolStrategy",
+    "ModbusStrategy",
+    "IEC104Strategy",
+    "DLT645Strategy",
+    "IEC61850Strategy",
+    "get_protocol_strategy",
+    "ModbusConfig",
+    "IEC104Config",
+    "DLT645Config",
+    "IEC61850Config",
+    "get_default_protocol_config",
+    "create_protocol_config",
+    "decimal_to_hex_formatted",
+    "IEC104Type",
+    "IEC104TypeInfo",
+    "IEC104ValueType",
+    "IEC104_DEFAULT_TYPE",
+    "IEC104_TYPE_REGISTRY",
+    "get_iec104_types_by_frame_type",
+    "get_iec104_type_info",
+    "get_default_iec104_type",
+    "resolve_iec104_type",
+    "is_double_point_type",
+    "is_step_type",
+    "is_normalized_type",
+    "is_scaled_type",
+    "is_short_float_type",
+    "encode_iec104_value",
+    "decode_iec104_value",
+]

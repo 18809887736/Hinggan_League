@@ -1,0 +1,631 @@
+"""
+数据读取器模块
+负责从协议处理器读取测点数据，支持同步/异步/批量读取模式。
+协议无关设计，支持 Modbus、IEC104、DLT645 等协议。
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from src.device.protocol.base_handler import ClientHandler
+from src.enums.modbus_register import Decode
+from src.enums.point_data import BasePoint, Yc, Yx
+
+if TYPE_CHECKING:
+    from src.device.device_base import Device
+from src.enums.points.change_tracker import ChangeSource, track_change
+
+
+@dataclass
+class AddressGroup:
+    """地址分组 - 用于批量读取优化
+
+    将连续地址的测点分组，以便一次性读取多个数据点。
+
+    Attributes:
+        start_address: 起始地址
+        register_count: 需要读取的数据点数量
+        points: 该组包含的测点列表
+    """
+
+    start_address: int
+    register_count: int
+    points: list[BasePoint] = field(default_factory=list)
+
+
+class DataReader:
+    """数据读取器
+
+    负责从协议处理器读取测点数据，将协议层的原始数据转换为应用层的测点值。
+    支持同步读取、异步逐点读取、异步批量读取三种模式。
+    """
+
+    def __init__(self, device: Device) -> None:
+        self._device = device
+
+    @property
+    def _handler(self):
+        """获取协议处理器（始终跟踪 device 的最新实例）"""
+        return self._device.protocol_handler
+
+    @property
+    def _log(self):
+        """获取日志器"""
+        return self._device.log
+
+    def _get_change_source(self) -> ChangeSource:
+        """根据协议处理器类型获取变更来源
+
+        服务端设备：get_slave_values 是从自己的内存寄存器读取值，
+                  不是远程修改，应使用 INTERNAL。
+                  真正的远程客户端写入通过 _on_modbus_client_write 回调处理。
+        客户端设备：从远程服务器读取数据变化，属于客户端读取。
+        """
+        if isinstance(self._handler, ClientHandler):
+            return ChangeSource.CLIENT_READ
+        return ChangeSource.INTERNAL
+
+    def _get_client_info(self) -> str:
+        """获取作为客户端时的真实远程服务地址(IP:Port 或 串口号)"""
+        if isinstance(self._handler, ClientHandler):
+            if self._device.serial_port:
+                return self._device.serial_port
+            return f"{self._device.ip}:{self._device.port}"
+        return ""
+
+    def get_slave_values(self, yc_list: list[Yc], yx_list: list[Yx]) -> None:
+        """同步读取从机的测点值
+
+        Args:
+            yc_list: 遥测列表
+            yx_list: 遥信列表
+        """
+        if not self._handler:
+            return
+
+        for point in yc_list + yx_list:
+            try:
+                value = self._handler.read_value(point)
+                if value is not None:
+                    with track_change(self._get_change_source(), f"数据同步 {point.code}", self._get_client_info()):
+                        point.value = value
+                    point.is_valid = True
+                else:
+                    point.is_valid = False
+            except (ConnectionError, Exception):
+                # 连接失败时静默处理，不中断线程
+                point.is_valid = False
+
+    async def get_slave_values_async(
+        self,
+        yc_list: list[Yc],
+        yx_list: list[Yx],
+        interval_ms: int | None = 0,
+        *,
+        stop_event: asyncio.Event | None = None,
+        progress_callback: Callable[[int, int, int, int], None] | None = None,
+    ) -> tuple[int, int]:
+        """异步读取从机的测点值（支持批量读取优化）
+
+        Args:
+            yc_list: 遥测列表
+            yx_list: 遥信列表
+            interval_ms: 每次批量读取请求之间的间隔(毫秒)
+
+        Returns:
+            Tuple[int, int]: (成功点数, 失败点数)
+
+        Modbus 客户端会合并连续地址；IEC 61850 使用类型/DataSet 批读；
+        DNP3 客户端使用单次 Class 0 完整性轮询；其他协议回退到逐点读取。
+        """
+        if not self._handler:
+            if self._device._logger:
+                self._device._logger.warning("get_slave_values_async: No protocol handler")
+            return 0, 0
+
+        all_points = yc_list + yx_list
+        if not all_points:
+            return 0, 0
+
+        # 检查是否支持批量读取优化
+        from src.device.protocol.dnp3_handler import DNP3ClientHandler
+        from src.device.protocol.iec61850_handler import IEC61850ClientHandler
+        from src.device.protocol.modbus_handler import ModbusClientHandler
+
+        is_modbus_client = isinstance(self._handler, ModbusClientHandler)
+        is_iec61850_client = isinstance(self._handler, IEC61850ClientHandler)
+        is_dnp3_client = isinstance(self._handler, DNP3ClientHandler)
+
+        if is_modbus_client:
+            # Modbus 批量读取优化
+            return await self._batch_read_async(
+                all_points,
+                interval_ms=interval_ms,
+                stop_event=stop_event,
+                progress_callback=progress_callback,
+            )
+        elif is_iec61850_client:
+            # IEC61850 批量读取优化
+            return await self._iec61850_batch_read_async(
+                all_points,
+                stop_event=stop_event,
+                progress_callback=progress_callback,
+            )
+        elif is_dnp3_client:
+            # DNP3 Class 0 完整性轮询一次即可刷新全部静态点。
+            return await self._dnp3_batch_read_async(
+                all_points,
+                stop_event=stop_event,
+                progress_callback=progress_callback,
+            )
+        else:
+            # 回退到逐点读取
+            return await self._single_read_async(
+                all_points,
+                interval_ms=interval_ms,
+                stop_event=stop_event,
+                progress_callback=progress_callback,
+            )
+
+    async def _iec61850_batch_read_async(
+        self,
+        points: Sequence[BasePoint],
+        *,
+        stop_event: asyncio.Event | None = None,
+        progress_callback: Callable[[int, int, int, int], None] | None = None,
+    ) -> tuple[int, int]:
+        """IEC61850 批量读取模式
+
+        利用 IEC61850ClientHandler.read_points_batch 按 iec_type 分组读取，
+        减少类型判断开销，连接断开时快速失败。
+
+        Args:
+            points: 测点列表
+
+        Returns:
+            Tuple[int, int]: (成功点数, 失败点数)
+        """
+        import asyncio
+
+        change_source = self._get_change_source()
+        client_info = self._get_client_info()
+
+        if stop_event is not None and stop_event.is_set():
+            return 0, 0
+
+        # 在 executor 中执行同步批量读取 (避免阻塞事件循环)。底层原生
+        # 调用不可强杀；停止请求会在调用返回后阻止下一批或下一轮。
+        loop = asyncio.get_running_loop()
+        batch_results = await loop.run_in_executor(None, self._handler.read_points_batch, points)
+
+        success_count = 0
+        fail_count = 0
+
+        for point in points:
+            if stop_event is not None and stop_event.is_set():
+                break
+            value = batch_results.get(point.code)
+            if value is not None:
+                with track_change(change_source, f"IEC61850批量同步 {point.code}", client_info):
+                    point.value = value
+                point.is_valid = True
+                success_count += 1
+            else:
+                point.is_valid = False
+                fail_count += 1
+            if progress_callback is not None:
+                progress_callback(success_count + fail_count, len(points), success_count, fail_count)
+
+        return success_count, fail_count
+
+    async def _dnp3_batch_read_async(
+        self,
+        points: Sequence[BasePoint],
+        *,
+        stop_event: asyncio.Event | None = None,
+        progress_callback: Callable[[int, int, int, int], None] | None = None,
+    ) -> tuple[int, int]:
+        """DNP3 批量读取：单次完整性轮询后映射全部测点。"""
+        if stop_event is not None and stop_event.is_set():
+            return 0, 0
+
+        batch_results = await self._handler.read_points_batch_async(points)
+        success_count = 0
+        fail_count = 0
+        change_source = self._get_change_source()
+        client_info = self._get_client_info()
+
+        for point in points:
+            if stop_event is not None and stop_event.is_set():
+                break
+            value = batch_results.get(point.code)
+            if value is not None:
+                with track_change(change_source, f"DNP3批量同步 {point.code}", client_info):
+                    point.value = value
+                point.is_valid = True
+                success_count += 1
+            else:
+                point.is_valid = False
+                fail_count += 1
+            if progress_callback is not None:
+                progress_callback(success_count + fail_count, len(points), success_count, fail_count)
+
+        return success_count, fail_count
+
+    async def _single_read_async(
+        self,
+        points: Sequence[BasePoint],
+        interval_ms: int | None = 0,
+        *,
+        stop_event: asyncio.Event | None = None,
+        progress_callback: Callable[[int, int, int, int], None] | None = None,
+    ) -> tuple[int, int]:
+        """逐点读取模式（回退方案）"""
+        success_count = 0
+        fail_count = 0
+        change_source = self._get_change_source()
+        for index, point in enumerate(points):
+            if stop_event is not None and stop_event.is_set():
+                break
+            try:
+                if isinstance(self._handler, ClientHandler):
+                    value = await self._handler.read_value_async(point)
+                else:
+                    value = self._handler.read_value(point)
+
+                if value is not None:
+                    with track_change(change_source, f"异步数据同步 {point.code}", self._get_client_info()):
+                        point.value = value
+                    point.is_valid = True
+                    success_count += 1
+                else:
+                    point.is_valid = False
+                    fail_count += 1
+            except (ConnectionError, Exception) as e:
+                self._log.error(f"Error reading point {point.code}: {e}")
+                point.is_valid = False
+                fail_count += 1
+            if progress_callback is not None:
+                progress_callback(success_count + fail_count, len(points), success_count, fail_count)
+            if interval_ms is not None and interval_ms > 0 and index < len(points) - 1:
+                if stop_event is None:
+                    await asyncio.sleep(interval_ms / 1000.0)
+                else:
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=interval_ms / 1000.0)
+                    except TimeoutError:
+                        pass
+                    if stop_event.is_set():
+                        break
+        return success_count, fail_count
+
+    async def _batch_read_async(
+        self,
+        points: Sequence[BasePoint],
+        interval_ms: int | None = 0,
+        *,
+        stop_event: asyncio.Event | None = None,
+        progress_callback: Callable[[int, int, int, int], None] | None = None,
+    ) -> tuple[int, int]:
+        """批量读取模式（优化方案）
+
+        将连续地址的测点分组，一次性读取多个数据点，然后解码映射。
+
+        Args:
+            points: 测点列表
+            interval_ms: 每次请求之间的间隔(毫秒)
+
+        Returns:
+            Tuple[int, int]: (成功点数, 失败点数)
+        """
+        # 1. 按 (slave_id, func_code) 分组
+        groups = self._group_points_by_address(points)
+
+        success_count = 0
+        fail_count = 0
+
+        is_first_request = True
+        for (slave_id, func_code), address_groups in groups.items():
+            for group in address_groups:
+                if stop_event is not None and stop_event.is_set():
+                    return success_count, fail_count
+                try:
+                    # 在请求之间添加间隔（第一次请求不等待）
+                    if not is_first_request and interval_ms is not None and interval_ms > 0:
+                        if stop_event is None:
+                            await asyncio.sleep(interval_ms / 1000.0)
+                        else:
+                            try:
+                                await asyncio.wait_for(stop_event.wait(), timeout=interval_ms / 1000.0)
+                            except TimeoutError:
+                                pass
+                            if stop_event.is_set():
+                                return success_count, fail_count
+                    is_first_request = False
+
+                    # 2. 批量读取
+                    registers = await self._handler.read_registers_batch_async(
+                        func_code, slave_id, group.start_address, group.register_count
+                    )
+
+                    if registers:
+                        # 3. 解码并映射到测点
+                        self._decode_batch_registers(registers, group.points, group.start_address)
+                        success_count += len(group.points)
+                    else:
+                        # 读取失败，标记所有测点无效
+                        for point in group.points:
+                            point.is_valid = False
+                        fail_count += len(group.points)
+
+                except Exception as e:
+                    self._log.error(f"Batch read error for slave={slave_id}, func={func_code}: {e}")
+                    for point in group.points:
+                        point.is_valid = False
+                    fail_count += len(group.points)
+
+                if progress_callback is not None:
+                    progress_callback(success_count + fail_count, len(points), success_count, fail_count)
+
+        return success_count, fail_count
+
+    def _group_points_by_address(
+        self,
+        points: Sequence[BasePoint],
+        max_gap: int = 0,
+        max_count: int = 120,
+    ) -> dict[tuple[int, int], list[AddressGroup]]:
+        """将测点按 (slave_id, func_code) 分组，并找出连续的地址段
+
+        Args:
+            points: 测点列表
+            max_gap: 允许的最大地址间隙（默认0，即必须严格连续）
+            max_count: 每次批量读取的最大数据点数量（默认120）
+
+        Returns:
+            字典：{(slave_id, func_code): [AddressGroup, ...]}
+        """
+        # 按 (slave_id, func_code) 分组
+        grouped: dict[tuple[int, int], list[BasePoint]] = {}
+        for point in points:
+            key = (point.rtu_addr, point.func_code)
+            if key not in grouped:
+                grouped[key] = []
+            grouped[key].append(point)
+
+        result: dict[tuple[int, int], list[AddressGroup]] = {}
+
+        for key, point_list in grouped.items():
+            # 按地址排序
+            point_list.sort(key=lambda p: p.address)
+
+            address_groups: list[AddressGroup] = []
+            current_group: AddressGroup | None = None
+
+            for point in point_list:
+                # 获取该测点占用的寄存器数量
+                decode_info = Decode.get_info(point.decode)
+                point_reg_count = decode_info.register_cnt
+                point_end_addr = int(point.address) + point_reg_count
+
+                if current_group is None:
+                    # 新建分组
+                    current_group = AddressGroup(
+                        start_address=int(point.address),
+                        register_count=point_reg_count,
+                        points=[point],
+                    )
+                else:
+                    current_end = current_group.start_address + current_group.register_count
+
+                    # 计算合并后的新结束地址和数量
+                    new_end = max(current_end, point_end_addr)
+                    new_count = new_end - current_group.start_address
+
+                    # 检查是否连续或在允许的间隙内，且总数量不超过限制
+                    if int(point.address) <= current_end + max_gap and new_count <= max_count:
+                        # 扩展当前分组
+                        if point_end_addr > current_end:
+                            current_group.register_count = new_count
+                        current_group.points.append(point)
+                    else:
+                        # 保存当前分组，开始新分组
+                        address_groups.append(current_group)
+                        current_group = AddressGroup(
+                            start_address=int(point.address),
+                            register_count=point_reg_count,
+                            points=[point],
+                        )
+
+            # 保存最后一个分组
+            if current_group:
+                address_groups.append(current_group)
+
+            result[key] = address_groups
+
+            # 日志记录优化效果
+            if len(point_list) > 1:
+                total_points = len(point_list)
+                total_groups = len(address_groups)
+                self._log.debug(
+                    f"Batch optimization: {total_points} points -> {total_groups} requests "
+                    f"(slave={key[0]}, func={key[1]})"
+                )
+
+        return result
+
+    def _decode_batch_registers(
+        self,
+        registers: list[int],
+        points: list[BasePoint],
+        start_address: int,
+    ) -> None:
+        """将批量读取的数据解码并映射到测点
+
+        Args:
+            registers: 读取到的原始数据列表
+            points: 需要解码的测点列表
+            start_address: 数据起始地址
+        """
+        for point in points:
+            try:
+                # 计算该测点在数据数组中的偏移
+                offset = int(point.address) - start_address
+                decode_info = Decode.get_info(point.decode)
+                reg_count = decode_info.register_cnt
+
+                # 检查偏移是否有效
+                if offset < 0 or offset + reg_count > len(registers):
+                    point.is_valid = False
+                    if self._device._logger:
+                        self._device._logger.warning(
+                            f"Invalid offset for point {point.code}: offset={offset}, "
+                            f"reg_count={reg_count}, total_regs={len(registers)}"
+                        )
+                    continue
+
+                # 提取该测点对应的数据
+                point_registers = registers[offset : offset + reg_count]
+
+                # 解码
+                value = self._decode_registers(point_registers, decode_info)
+
+                if value is not None:
+                    bit_offset = getattr(point, "bit", None)
+                    if bit_offset is not None:
+                        try:
+                            value = int(bool((int(value) >> bit_offset) & 1))
+                        except (ValueError, TypeError):
+                            pass
+
+                    with track_change(self._get_change_source(), f"批量数据同步 {point.code}", self._get_client_info()):
+                        point.value = value
+                    point.is_valid = True
+                else:
+                    point.is_valid = False
+
+            except Exception as e:
+                self._log.error(f"Error decoding point {point.code}: {e}")
+                point.is_valid = False
+
+    def _decode_registers(self, registers: list[int], decode_info) -> int | float | None:
+        """将原始数据解码为实际值
+
+        Args:
+            registers: 原始数据列表
+            decode_info: 解码配置信息
+
+        Returns:
+            解码后的值
+        """
+        if not registers:
+            return None
+
+        try:
+            return Decode.decode_registers(decode_info.code, registers[: decode_info.register_cnt])
+
+        except Exception as e:
+            self._log.error(f"Decode error: {e}, registers={registers}")
+            return None
+
+    def sync_iec104_client_values(self, slave_id: int) -> None:
+        """同步 IEC104 客户端从服务端接收的值到内部测点
+
+        当服务端主动上报数据时，c104.Point 对象的 .value 会自动更新，
+        此方法将这些值同步到应用内部的测点对象。
+
+        c104 库对不同 ASDU 类型返回不同的值类型：
+        - 归一化 (M_ME_NA_1): 返回 NormalizedFloat，float() 后为 -1~+1 范围的浮点数
+        - 标度化 (M_ME_NB_1): 返回 Int16，float() 后为标度值
+        - 短浮点 (M_ME_NC_1): 返回 Python float
+        """
+        try:
+            from src.device.protocol.iec104_handler import IEC104ClientHandler
+
+            if not isinstance(self._handler, IEC104ClientHandler):
+                self._log.error("Handler is not IEC104ClientHandler")
+                return
+
+            if not self._handler.is_running:
+                self._log.error("Handler is not running")
+                return
+
+            client = self._handler._client
+            if not client:
+                self._log.error("Client is not available")
+                return
+
+            # 根据 slave_id 获取对应的 Station
+            common_address = int(slave_id)
+            station = client.stations.get(common_address)
+            if not station:
+                self._log.error(f"Station with common_address {common_address} not found")
+                return
+
+            # 获取该从机下的所有测点 (yc, yx, yt, yk)
+            yc_list, yx_list, yt_list, yk_list = self._device.point_manager.get_points_by_slave(slave_id)
+            all_points = yc_list + yx_list + yt_list + yk_list
+
+            for point in all_points:
+                try:
+                    # 直接从 c104.Point 对象读取值（服务端上报时自动更新）
+                    c104_point = station.get_point(io_address=point.address)
+                    if c104_point is None:
+                        self._log.error(f"Point {point.code} not found in client station {common_address}")
+                        continue
+
+                    # 同步品质描述符（c104.Point.quality 在服务端上报时自动更新）
+                    # c104 库的品质位编码与应用层不同，需要转换
+                    if hasattr(c104_point, "quality") and c104_point.quality is not None:
+                        try:
+                            from src.enums.points.iec104_quality import decode_quality_from_c104
+
+                            qd = decode_quality_from_c104(c104_point, point.frame_type)
+                            point.iec_quality = qd
+                        except Exception:
+                            pass
+
+                    # float() 统一将 c104 值转为 Python float
+                    # c104 库已内部完成类型解码（归一化值已转为 -1~+1 浮点数）
+                    c104_value = float(c104_point.value) if c104_point.value is not None else None
+                    if c104_value is not None:
+                        if isinstance(point, Yc):
+                            try:
+                                from src.enums.points.iec104_type import decode_iec104_value
+
+                                decoded_val = decode_iec104_value(c104_value, point.iec_type_id)
+                                from src.enums.modbus_register import Decode
+
+                                info = Decode.get_info(point.decode)
+                                if info.is_float:
+                                    store_value = float(decoded_val)
+                                else:
+                                    store_value = int(round(decoded_val))
+                                with track_change(
+                                    ChangeSource.CLIENT_READ,
+                                    f"IEC104客户端同步 {point.code}",
+                                    self._get_client_info(),
+                                ):
+                                    point.value = store_value
+                                point.is_valid = True
+                            except (ValueError, TypeError) as e:
+                                self._log.error(f"Error decoding point {point.code}: {e}")
+                                point.is_valid = False
+                        else:
+                            with track_change(
+                                ChangeSource.CLIENT_READ,
+                                f"IEC104客户端同步 {point.code}",
+                                self._get_client_info(),
+                            ):
+                                point.value = c104_value
+                            point.is_valid = True
+                    else:
+                        point.is_valid = False
+                except Exception as e:
+                    self._log.debug(f"同步测点 {point.code} 失败: {e}")
+        except Exception as e:
+            self._log.error(f"IEC104 客户端数据同步失败: {e}")

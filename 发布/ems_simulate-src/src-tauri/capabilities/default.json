@@ -1,0 +1,35 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for EMS Simulate",
+  "windows": ["main", "message-*"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://gitee.com/chen-dongyu123", "app": "msedge" },
+        { "url": "https://github.com/600888", "app": "msedge" },
+        {
+          "url": "https://600888.github.io/ems_simulate/",
+          "app": "msedge"
+        }
+      ]
+    },
+    "opener:allow-open-path",
+    "opener:allow-reveal-item-in-dir",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-message",
+    "dialog:allow-ask",
+    "process:allow-exit",
+    "process:allow-restart",
+    "shell:allow-open",
+    "shell:default",
+    "allow-get-backend-url",
+    "allow-is-backend-ready",
+    "allow-restart-backend",
+    "allow-open-directory",
+    "allow-save-file"
+  ]
+}

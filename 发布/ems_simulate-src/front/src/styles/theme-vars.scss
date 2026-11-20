@@ -1,0 +1,154 @@
+/* 全局设计系统变量定义 */
+
+:root {
+  /* 布局尺寸 */
+  --header-height: 48px;
+  --sidebar-width: 280px;
+  --sidebar-collapsed-width: 64px;
+  --tags-height: 34px;
+  --footer-height: 32px;
+
+  /* 测点状态背景色 */
+  --status-normal-bg: #f0fdf4;
+  --status-error-bg: #fef2f2;
+  --status-info-bg: #eff6ff;
+  --status-text-normal: #16a34a;
+  --status-text-error: #dc2626;
+  --status-text-info: #2563eb;
+
+  /* 基础颜色 - 浅色模式默认值 */
+  --bg-main: #f1f5f9;
+  --bg-sidebar: linear-gradient(180deg, #fdfdff 0%, #f5f7fa 100%);
+  --sidebar-border: rgba(0, 0, 0, 0.05);
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --panel-bg: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-subtle: #f8fafc;
+  --bg-muted: #eef2f6;
+  --border-color: #dfe5ec;
+  --table-header-bg: #e8edf3;
+  --table-row-bg: #ffffff;
+  --table-stripe-bg: #f6f8fb;
+  --table-hover-bg: #eaf2fb;
+
+  /* 品牌色 */
+  --color-primary: #3b82f6;
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+
+  /* 组件装饰 */
+  --box-shadow-base: 0 4px 15px rgba(0, 0, 0, 0.05);
+  --border-radius-base: 12px;
+
+  /* 通道/设备相关 */
+  --item-hover-bg: rgba(59, 130, 246, 0.05);
+  --item-active-bg: rgba(59, 130, 246, 0.1);
+}
+
+/* 深色模式覆盖项 */
+body.theme-dark {
+  --status-normal-bg: rgba(22, 163, 74, 0.15);
+  --status-error-bg: rgba(220, 38, 38, 0.15);
+  --status-info-bg: rgba(37, 99, 235, 0.15);
+  --status-text-normal: #4ade80;
+  --status-text-error: #f87171;
+  --status-text-info: #60a5fa;
+
+  /* 深灰蓝而不是纯黑，降低大面积暗色带来的压迫感 */
+  --bg-main: #202735;
+  --bg-sidebar: linear-gradient(180deg, #293241 0%, #252e3d 100%);
+  --sidebar-border: rgba(184, 199, 219, 0.11);
+  --text-primary: #edf2f8;
+  --text-secondary: #aebcce;
+  --panel-bg: #293241;
+  --bg-elevated: #303b4d;
+  --bg-subtle: #252e3d;
+  --bg-muted: #354154;
+  --border-color: #3c485b;
+  --table-header-bg: #3a465a;
+  --table-row-bg: #2b3545;
+  --table-stripe-bg: #303b4d;
+  --table-hover-bg: #3a485d;
+
+  --box-shadow-base: 0 8px 24px rgba(7, 12, 20, 0.18);
+
+  --item-hover-bg: rgba(148, 181, 224, 0.1);
+  --item-active-bg: rgba(96, 165, 250, 0.2);
+
+  /* Element Plus 全局暗色变量（包含 teleport 到 body 的弹层） */
+  color-scheme: dark;
+  --el-bg-color: var(--panel-bg);
+  --el-bg-color-page: var(--bg-main);
+  --el-bg-color-overlay: var(--bg-elevated);
+  --el-text-color-primary: var(--text-primary);
+  --el-text-color-regular: #d4deea;
+  --el-text-color-secondary: var(--text-secondary);
+  --el-text-color-placeholder: #8796aa;
+  --el-text-color-disabled: #68778b;
+  --el-border-color: var(--border-color);
+  --el-border-color-light: #3b4759;
+  --el-border-color-lighter: #364153;
+  --el-border-color-extra-light: #313c4c;
+  --el-border-color-dark: #526178;
+  --el-border-color-darker: #607087;
+  --el-fill-color: #354154;
+  --el-fill-color-light: #303b4d;
+  --el-fill-color-lighter: #2d3747;
+  --el-fill-color-extra-light: #293342;
+  --el-fill-color-dark: #3e4b60;
+  --el-fill-color-darker: #48566b;
+  --el-fill-color-blank: var(--panel-bg);
+  --el-mask-color: rgba(10, 15, 24, 0.58);
+  --el-mask-color-extra-light: rgba(10, 15, 24, 0.28);
+  --el-box-shadow: 0 10px 30px rgba(7, 12, 20, 0.28);
+  --el-box-shadow-light: 0 6px 20px rgba(7, 12, 20, 0.22);
+  --el-box-shadow-lighter: 0 3px 12px rgba(7, 12, 20, 0.18);
+  --el-box-shadow-dark: 0 12px 36px rgba(7, 12, 20, 0.36);
+}
+
+/* 统一重写 Element Plus 的部分基础变量 */
+body {
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+  transition:
+    background-color 0.3s,
+    color 0.3s;
+}
+
+.el-main {
+  background-color: var(--bg-main) !important;
+}
+
+/* 玻璃拟态卡片类 */
+.glass-card {
+  background: var(--panel-bg);
+  border-radius: var(--border-radius-base);
+  box-shadow: var(--box-shadow-base);
+  border: 1px solid var(--sidebar-border);
+}
+
+/* ========================================
+   响应式断点覆盖 - 随窗口尺寸缩放布局
+   ======================================== */
+
+/* medium 断点 (1200px ~ 1399px): 标准桌面窗口，适当缩小 */
+@media (max-width: 1399px) {
+  :root {
+    --header-height: 44px;
+    --sidebar-width: 260px;
+    --tags-height: 32px;
+    --footer-height: 28px;
+  }
+}
+
+/* small 断点 (960px ~ 1199px): 最小窗口/笔记本，强制折叠侧边栏 */
+@media (max-width: 1199px) {
+  :root {
+    --header-height: 40px;
+    --sidebar-width: 64px;
+    --tags-height: 30px;
+    --footer-height: 24px;
+  }
+}

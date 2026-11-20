@@ -1,0 +1,185 @@
+"""SclReportTransformer — SclDocument → Report 配置数据
+
+替代 IcdGooseImporter.get_report_controls() 的逻辑:
+  SclDocument → ReportControl 配置列表
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..model.scl_document import (
+    SclDataSet,
+    SclDocument,
+    SclLDevice,
+    SclLN,
+    SclReportControl,
+)
+from ..parser.dataset_types import DataSetTypeResolver
+
+
+@dataclass
+class ReportControlInfo:
+    """ReportControl 转换结果"""
+
+    ld_inst: str = ""
+    name: str = ""
+    rcb_type: str = ""  # "BRCB" / "URCB"
+    rpt_id: str = ""
+    dat_set: str = ""
+    data_set_ref: str = ""
+    conf_rev: int = 1
+    buf_time: int = 0
+    intg_period: int = 0
+    ln_name: str = ""
+    trg_ops: dict[str, bool] = field(default_factory=dict)
+    opt_fields: dict[str, bool] = field(default_factory=dict)
+    entries: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class ReportTransformResult:
+    """Report 转换结果"""
+
+    report_controls: list[ReportControlInfo] = field(default_factory=list)
+
+
+class SclReportTransformer:
+    """SCL Report 转换器"""
+
+    def __init__(self, doc: SclDocument):
+        """保存 SCL 文档与设备标识，用于把 ReportControl 转换为报告配置。"""
+        self._doc = doc
+        self._dataset_type_resolver = DataSetTypeResolver(doc)
+
+    def transform(self) -> ReportTransformResult:
+        """执行转换"""
+        result = ReportTransformResult()
+
+        for ied in self._doc.ieds:
+            for ap in ied.access_points:
+                if not ap.server:
+                    continue
+                for ld in ap.server.ldevices:
+                    all_lns = ([ld.ln0] + ld.lns) if ld.ln0 else ld.lns
+                    for ln in all_lns:
+                        self._transform_ln(ln, ld, result, ied.name)
+
+        return result
+
+    def _transform_ln(
+        self,
+        ln: SclLN,
+        ld: SclLDevice,
+        result: ReportTransformResult,
+        ied_name: str,
+    ) -> None:
+        """转换单个 LN 的 ReportControl，含 RptEnabled max 多实例展开"""
+        ds_map: dict[str, SclDataSet] = {ds.name: ds for ds in ln.datasets}
+
+        for rc in ln.report_controls:
+            # RptEnabled max: 多实例 URCB 展开为 baseName01, baseName02, ...
+            instance_count = max(rc.rpt_enabled_max, 1)
+            for idx in range(1, instance_count + 1):
+                info = self._build_report_info(rc, ln, ld, ds_map, idx, instance_count, ied_name)
+                result.report_controls.append(info)
+
+    def _build_report_info(
+        self,
+        rc: SclReportControl,
+        ln: SclLN,
+        ld: SclLDevice,
+        ds_map: dict[str, SclDataSet],
+        instance_idx: int = 1,
+        instance_count: int = 1,
+        ied_name: str = "",
+    ) -> ReportControlInfo:
+        """构建 ReportControlInfo
+
+        Args:
+            instance_idx: 多实例序号 (1-based)，用于生成 baseName01, baseName02, ...
+            instance_count: 总实例数
+        """
+        rcb_type = "BRCB" if rc.buffered else "URCB"
+        # 多实例时名称加两位序号后缀，如 rpRack1CellTemp01 / rpRack1CellTemp02
+        if instance_count > 1:
+            rcb_name = f"{rc.name}{instance_idx:02d}"
+        else:
+            rcb_name = rc.name
+        # libIEC61850 uses RptId as the report routing key. Each expanded RCB
+        # instance needs a distinct value, otherwise all reports are delivered
+        # to the first subscriber and cannot be attributed correctly.
+        base_rpt_id = rc.rpt_id or rc.name
+        if instance_count > 1:
+            rpt_id = f"{base_rpt_id}{instance_idx:02d}"
+        else:
+            rpt_id = base_rpt_id
+            # 当 name 带数字后缀（如 "rpRack1CellTemp03"）而 rpt_id 是其
+            # 前缀（如 "rpRack1CellTemp"）时，name 的后缀需要继承到 rpt_id，
+            # 保证每个 RCB 的 RptId 唯一。
+            if rc.rpt_id and rc.name.startswith(rc.rpt_id) and rc.name != rc.rpt_id:
+                suffix = rc.name[len(rc.rpt_id) :]
+                if suffix:
+                    rpt_id = f"{rpt_id}{suffix}"
+        data_set_ref = f"{ld.inst}/{ln.ln_name}${rc.dat_set}" if rc.dat_set else ""
+
+        # 解析 DataSet 条目
+        entries = []
+        if rc.dat_set and rc.dat_set in ds_map:
+            ds = ds_map[rc.dat_set]
+            for fcda in ds.members:
+                iec_type = self._dataset_type_resolver.resolve_iec_type(fcda, ied_name)
+                default_val = _default_value_for_type(iec_type)
+                entries.append(
+                    {
+                        "name": fcda.fcda_ref,
+                        "value": default_val,
+                        "iec_type": iec_type,
+                        "fc": fcda.fc,
+                    }
+                )
+
+        return ReportControlInfo(
+            ld_inst=ld.inst,
+            name=rcb_name,
+            rcb_type=rcb_type,
+            rpt_id=rpt_id,
+            dat_set=rc.dat_set,
+            data_set_ref=data_set_ref,
+            conf_rev=rc.conf_rev,
+            buf_time=rc.buf_time,
+            intg_period=rc.intg_period,
+            ln_name=ln.ln_name,
+            trg_ops={
+                "dchg": rc.trg_ops.dchg,
+                "qchg": rc.trg_ops.qchg,
+                "dupd": rc.trg_ops.dupd,
+                "period": rc.trg_ops.period,
+                "gi": rc.trg_ops.gi,
+            },
+            opt_fields={
+                "seq_num": rc.opt_fields.seq_num,
+                "time_stamp": rc.opt_fields.time_stamp,
+                "data_set": rc.opt_fields.data_set,
+                "reason_code": rc.opt_fields.reason_code,
+                "data_ref": rc.opt_fields.data_ref,
+                "entry_id": rc.opt_fields.entry_id,
+                "config_ref": rc.opt_fields.config_ref,
+                "buf_ovfl": rc.opt_fields.buf_ovfl,
+            },
+            entries=entries,
+        )
+
+
+def _default_value_for_type(iec_type: str) -> Any:
+    """返回指定 IEC 数据类型在导入模型中的安全默认值。"""
+    defaults = {
+        "boolean": False,
+        "integer": 0,
+        "float": 0.0,
+        "string": "",
+        "bitstring": 0,
+        "timestamp": 0,
+    }
+    return defaults.get(iec_type, False)

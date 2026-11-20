@@ -1,0 +1,37 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "backend-remote",
+  "description": "Allow the frontend served by the local EMS backend to query and restart that backend.",
+  "local": false,
+  "windows": ["main", "message-*"],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*",
+      "http://localhost:*"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://gitee.com/chen-dongyu123", "app": "msedge" },
+        { "url": "https://github.com/600888", "app": "msedge" },
+        {
+          "url": "https://600888.github.io/ems_simulate/",
+          "app": "msedge"
+        }
+      ]
+    },
+    "opener:allow-open-path",
+    "opener:allow-reveal-item-in-dir",
+    "allow-get-backend-url",
+    "allow-is-backend-ready",
+    "allow-restart-backend",
+    "allow-open-directory",
+    "allow-save-file"
+  ]
+}

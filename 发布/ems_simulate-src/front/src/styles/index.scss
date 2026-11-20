@@ -1,0 +1,228 @@
+@use "./theme-vars.scss";
+
+* {
+  padding: 0;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+}
+
+/* 为浮层提供有尺寸的定位父级，定位库可据此换算根节点缩放后的坐标。 */
+body {
+  position: relative;
+}
+
+/* 全局圆角工程与细节优化 */
+:root {
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-border-radius-round: 24px;
+}
+
+/* 统一输入框与选择器圆角 */
+.el-input__wrapper,
+.el-select__wrapper,
+.el-textarea__inner {
+  border-radius: 8px !important;
+  box-shadow: 0 0 0 1px var(--sidebar-border) inset !important;
+  background-color: transparent !important;
+}
+
+/* 表格统一使用主题语义色，避免暗色页面中出现突兀的浅灰表格。 */
+.el-table {
+  --el-table-bg-color: var(--table-row-bg);
+  --el-table-tr-bg-color: var(--table-row-bg);
+  --el-table-header-bg-color: var(--table-header-bg);
+  --el-table-row-hover-bg-color: var(--table-hover-bg);
+  --el-table-current-row-bg-color: var(--item-active-bg);
+  --el-table-border-color: var(--border-color);
+  --el-table-header-text-color: var(--text-primary);
+  --el-table-text-color: var(--text-primary);
+  background-color: var(--table-row-bg);
+}
+
+.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background-color: var(--table-stripe-bg);
+}
+
+.el-card,
+.el-dialog,
+.el-drawer,
+.el-message-box,
+.el-popper,
+.el-dropdown-menu {
+  color: var(--text-primary);
+}
+
+/* 设备组树形选择器的选项行高与普通下拉选项（34px）一致。 */
+.device-group-select-popper .el-tree-node__content {
+  height: 34px;
+}
+
+body.theme-dark {
+  .el-card,
+  .el-dialog,
+  .el-drawer,
+  .el-message-box,
+  .el-popper,
+  .el-dropdown-menu,
+  .el-tabs,
+  .el-collapse-item__wrap,
+  .el-collapse-item__header {
+    background-color: var(--panel-bg);
+  }
+
+  .el-input__wrapper,
+  .el-select__wrapper,
+  .el-textarea__inner,
+  .el-input-number,
+  .el-date-editor {
+    background-color: var(--bg-subtle) !important;
+  }
+
+  .el-descriptions__body,
+  .el-descriptions__cell,
+  .el-empty,
+  .el-pagination {
+    color: var(--text-primary);
+  }
+}
+
+/* 统一按钮造型 */
+.el-button {
+  border-radius: 8px;
+  font-weight: 500;
+
+  &.is-round {
+    border-radius: 20px;
+  }
+
+  &.is-circle {
+    border-radius: 50%;
+  }
+}
+
+/* 消息提示框优化 */
+.el-message {
+  border-radius: 12px;
+  border: 1px solid var(--sidebar-border);
+}
+
+/*
+ * 全局弹框布局
+ * Element Plus 默认将弹框 teleport 到 body。根节点统一缩放后，遮罩和弹框
+ * 使用补偿后的逻辑视口尺寸，内容区自行滚动。
+ */
+body > .el-overlay {
+  position: fixed !important;
+  inset: 0 !important;
+  width: var(--app-viewport-width, 100vw) !important;
+  height: var(--app-viewport-height, 100vh) !important;
+  overflow: auto !important;
+}
+
+.el-overlay-dialog {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 100%;
+  padding: calc(var(--app-viewport-height, 100vh) * 0.04) 16px;
+  overflow: auto;
+}
+
+.el-overlay-dialog .el-dialog {
+  display: flex;
+  flex-direction: column;
+  max-width: calc(var(--app-viewport-width, 100vw) - 32px);
+  max-height: calc(var(--app-viewport-height, 100vh) * 0.92);
+  margin: 0 auto !important;
+  border-radius: 16px !important;
+  overflow: hidden;
+}
+
+.el-overlay-dialog .el-dialog__header,
+.el-overlay-dialog .el-dialog__footer {
+  flex: 0 0 auto;
+}
+
+.el-overlay-dialog .el-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* MessageBox 同样限制在当前视口内。 */
+.el-message-box {
+  width: var(--el-messagebox-width, 420px);
+  max-width: calc(var(--app-viewport-width, 100vw) - 32px);
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--sidebar-border);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ========================================
+   Element Plus 响应式全局覆盖
+   ======================================== */
+
+/* 对话框在窄屏下自动缩小 */
+body.layout-small {
+  .el-overlay-dialog .el-dialog {
+    max-height: calc(var(--app-viewport-height, 100vh) * 0.92);
+
+    .el-dialog__body {
+      min-height: 0;
+      overflow-y: auto;
+    }
+  }
+}
+
+/* 表格在小窗口下支持横向滚动 */
+body.layout-small {
+  .el-table {
+    font-size: 13px;
+
+    .el-table__header-wrapper th,
+    .el-table__body-wrapper td {
+      padding: 8px 4px;
+    }
+  }
+}
+
+/* 表单在窄屏下 label 自适应 */
+body.layout-small {
+  .el-form--label-left {
+    .el-form-item__label {
+      width: auto !important;
+      min-width: 80px;
+    }
+  }
+}
+
+/* 按钮组在窄屏下缩小间距 */
+body.layout-small,
+body.layout-medium {
+  .el-button-group .el-button {
+    padding: 5px 10px;
+    font-size: 12px;
+  }
+}

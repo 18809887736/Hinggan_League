@@ -1,0 +1,259 @@
+<template>
+  <div class="device-form-points">
+    <!-- IEC 61850 服务端: ICD 文件导入 -->
+    <template v-if="protocolType === 4 && connType === 2">
+      <el-divider content-position="left">{{
+        $t("device.icdImport")
+      }}</el-divider>
+
+      <el-form-item :label="$t('device.icdFile')">
+        <el-upload
+          ref="icdUploadRef"
+          action="#"
+          :auto-upload="true"
+          :limit="1"
+          :http-request="handleIcdFileRequest"
+          accept=".icd,.scd,.cid,.xml"
+        >
+          <template #trigger>
+            <el-button type="success" plain :icon="Upload">{{
+              $t("device.selectIcd")
+            }}</el-button>
+          </template>
+          <template #tip>
+            <div class="el-upload__tip">
+              {{ $t("device.icdTip") }}
+            </div>
+          </template>
+        </el-upload>
+      </el-form-item>
+    </template>
+
+    <!-- IEC 61850 客户端提示 -->
+    <template v-else-if="protocolType === 4 && connType === 1">
+      <el-alert
+        :title="$t('device.clientNoIcdNeeded')"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-top: 16px"
+      />
+    </template>
+
+    <!-- DL/T645: 标准库或 Excel 点表 -->
+    <template v-else-if="protocolType === 3">
+      <el-divider content-position="left">{{
+        $t("device.dlt645PointTable")
+      }}</el-divider>
+      <el-form-item :label="$t('device.dlt645PointMode')">
+        <el-radio-group v-model="pointMode" :disabled="disabled">
+          <el-radio-button value="standard">{{
+            $t("device.dlt645Standard")
+          }}</el-radio-button>
+          <el-radio-button value="import">{{
+            $t("device.dlt645Import")
+          }}</el-radio-button>
+        </el-radio-group>
+      </el-form-item>
+      <el-alert
+        v-if="pointMode === 'standard'"
+        :title="$t('device.dlt645StandardTip')"
+        type="info"
+        :closable="false"
+        show-icon
+      />
+      <el-form-item
+        v-else
+        :label="$t('device.pointFile')"
+        class="point-file-row"
+      >
+        <el-upload
+          ref="uploadRef"
+          action="#"
+          :auto-upload="true"
+          :limit="1"
+          :http-request="handleFileRequest"
+          accept=".xlsx,.xls"
+        >
+          <template #trigger>
+            <el-button type="success" plain :icon="Upload">{{
+              $t("device.selectExcel")
+            }}</el-button>
+          </template>
+          <template #tip>
+            <div class="el-upload__tip">{{ $t("device.excelTip") }}</div>
+          </template>
+        </el-upload>
+      </el-form-item>
+    </template>
+
+    <template v-else-if="protocolType === 8">
+      <el-divider content-position="left">{{
+        l("DL/T 698 点表", "DL/T 698 point table")
+      }}</el-divider>
+      <el-form-item :label="$t('device.dlt645PointMode')">
+        <el-radio-group v-model="pointMode" :disabled="disabled">
+          <el-radio-button value="standard">{{
+            l("标准点表", "Standard catalog")
+          }}</el-radio-button>
+          <el-radio-button value="import">{{
+            l("默认点表", "Default point table")
+          }}</el-radio-button>
+        </el-radio-group>
+      </el-form-item>
+      <el-alert
+        v-if="pointMode === 'standard'"
+        :title="
+          l(
+            '按当前接线方式、费率与谐波配置导入内置标准点表；普通编辑保留已有测点和值。',
+            'Import the built-in catalog for the current wiring, tariffs and harmonics. Ordinary edits retain existing points and values.',
+          )
+        "
+        type="info"
+        :closable="false"
+        show-icon
+      />
+      <el-form-item
+        v-else
+        :label="$t('device.pointFile')"
+        class="point-file-row"
+      >
+        <el-upload
+          ref="uploadRef"
+          action="#"
+          :auto-upload="true"
+          :limit="1"
+          :http-request="handleFileRequest"
+          :disabled="disabled"
+          accept=".xlsx"
+        >
+          <template #trigger
+            ><el-button type="success" plain :icon="Upload">{{
+              $t("device.selectExcel")
+            }}</el-button></template
+          >
+          <template #tip
+            ><div class="el-upload__tip">
+              {{
+                l(
+                  "可导入 DL/T 698 专用 .xlsx 点表；不选择文件则保留现有点表，新设备保持空点表。initial_value 列使用有类型的 Data JSON。",
+                  "Optionally import a DL/T 698 .xlsx table. Without a file, retain existing points or leave a new device empty. Use typed Data JSON in initial_value.",
+                )
+              }}
+            </div></template
+          >
+        </el-upload>
+      </el-form-item>
+    </template>
+
+    <!-- OPC UA 与其他协议按各自格式导入 Excel 点表 -->
+    <template v-else>
+      <el-divider content-position="left">{{
+        $t("device.pointTable")
+      }}</el-divider>
+
+      <el-form-item :label="$t('device.pointFile')">
+        <el-upload
+          ref="uploadRef"
+          action="#"
+          :auto-upload="true"
+          :limit="1"
+          :http-request="handleFileRequest"
+          :disabled="disabled"
+          :accept="protocolType === 7 ? '.xlsx' : '.xlsx,.xls'"
+        >
+          <template #trigger>
+            <el-button type="success" plain :icon="Upload">{{
+              $t("device.selectExcel")
+            }}</el-button>
+          </template>
+          <template #tip>
+            <div class="el-upload__tip">
+              {{
+                $t(
+                  protocolType === 7
+                    ? "opcua.deviceFormPointsHint"
+                    : "device.excelTip",
+                )
+              }}
+            </div>
+          </template>
+        </el-upload>
+      </el-form-item>
+    </template>
+  </div>
+</template>
+
+<script lang="ts" setup>
+import { ref, watch } from "vue";
+import { Upload } from "@element-plus/icons-vue";
+import { useDlt698Text } from "@/composables/useDlt698Text";
+
+const l = useDlt698Text();
+
+const props = defineProps<{
+  protocolType?: number;
+  connType?: number;
+  disabled?: boolean;
+  isEditMode?: boolean;
+  pointMode?: "standard" | "import";
+}>();
+
+const uploadRef = ref();
+const icdUploadRef = ref();
+
+const emit = defineEmits<{
+  (e: "file-change", file: any): void;
+  (e: "icd-file-change", file: any): void;
+  (e: "point-mode-change", mode: "standard" | "import"): void;
+}>();
+
+const pointMode = ref<"standard" | "import">(
+  props.pointMode || (props.isEditMode ? "import" : "standard"),
+);
+
+watch(
+  () => props.pointMode,
+  (mode) => {
+    if (mode) pointMode.value = mode;
+  },
+  { immediate: true },
+);
+watch(
+  pointMode,
+  (mode) => {
+    if (mode === "standard") {
+      uploadRef.value?.clearFiles();
+      emit("file-change", null);
+    }
+    emit("point-mode-change", mode);
+  },
+  { immediate: true },
+);
+
+const handleFileRequest = (options: any) => {
+  emit("file-change", options.file);
+  return Promise.resolve();
+};
+
+const handleIcdFileRequest = (options: any) => {
+  emit("icd-file-change", options.file);
+  return Promise.resolve();
+};
+
+const clearFiles = () => {
+  uploadRef.value?.clearFiles();
+  icdUploadRef.value?.clearFiles();
+};
+
+defineExpose({ clearFiles });
+</script>
+
+<style lang="scss" scoped>
+.device-form-points {
+  margin-top: 10px;
+}
+.point-file-row {
+  margin-top: 14px;
+}
+</style>

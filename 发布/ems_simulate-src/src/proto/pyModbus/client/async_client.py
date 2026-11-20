@@ -1,0 +1,445 @@
+"""
+异步 Modbus 客户端
+用于在同一进程中与异步服务端通信，避免事件循环阻塞
+"""
+
+import asyncio
+
+from pymodbus.client import AsyncModbusTcpClient, AsyncModbusTlsClient
+from pymodbus.exceptions import ModbusException
+from pymodbus.pdu import ModbusPDU as ModbusRequest
+from pymodbus.pdu import ModbusPDU as ModbusResponse
+
+# 导入所有需要的 PDU 类
+from pymodbus.pdu.bit_message import (
+    ReadCoilsRequest,
+    ReadDiscreteInputsRequest,
+    WriteMultipleCoilsRequest,
+    WriteSingleCoilRequest,
+)
+from pymodbus.pdu.register_message import (
+    ReadHoldingRegistersRequest,
+    ReadInputRegistersRequest,
+    WriteMultipleRegistersRequest,
+    WriteSingleRegisterRequest,
+)
+
+from src.device.core.message.message_capture import MessageCapture
+from src.enums.modbus_register import Decode
+from src.proto.pyModbus.tls import create_client_ssl_context
+
+
+class AsyncModbusClient:
+    """
+    异步 Modbus 客户端
+    使用 pymodbus 的 AsyncModbusTcpClient 避免阻塞事件循环
+    """
+
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 502,
+        timeout: float = 3.0,
+        retries: int = 1,
+        tls_enabled: bool = False,
+        tls_mode: str = "one_way",
+        tls_version: str = "1.2",
+        certificate_path: str | None = None,
+        private_key_path: str | None = None,
+        ca_certificate_path: str | None = None,
+        log=None,
+    ):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.retries = retries
+        self.tls_enabled = tls_enabled
+        self.tls_mode = tls_mode
+        self.tls_version = tls_version
+        self.certificate_path = certificate_path
+        self.private_key_path = private_key_path
+        self.ca_certificate_path = ca_certificate_path
+        self.log = log
+        self.client: AsyncModbusTcpClient | None = None
+        self.connected = False
+        self.message_capture = MessageCapture()
+
+    async def connect(self) -> bool:
+        """异步连接到 Modbus 服务器"""
+        try:
+            if self.tls_enabled:
+                ssl_context = create_client_ssl_context(
+                    tls_mode=self.tls_mode,
+                    tls_version=self.tls_version,
+                    certificate_path=self.certificate_path,
+                    private_key_path=self.private_key_path,
+                    ca_certificate_path=self.ca_certificate_path,
+                )
+                self.client = AsyncModbusTlsClient(
+                    host=self.host,
+                    port=self.port,
+                    sslctx=ssl_context,
+                    timeout=self.timeout,
+                    retries=self.retries,
+                )
+            else:
+                self.client = AsyncModbusTcpClient(
+                    host=self.host,
+                    port=self.port,
+                    timeout=self.timeout,
+                    retries=self.retries,
+                )
+            self.connected = await self.client.connect()
+            if self.connected:
+                if self.log:
+                    self.log.info(f"异步 Modbus 客户端已连接到 {self.host}:{self.port}")
+            else:
+                if self.log:
+                    self.log.error(f"异步 Modbus 客户端连接失败: {self.host}:{self.port}")
+            return self.connected
+        except Exception as e:
+            if self.log:
+                self.log.error(f"异步连接失败: {e}")
+            self.connected = False
+            return False
+
+    async def disconnect(self) -> None:
+        """断开连接"""
+        if self.client:
+            try:
+                # 先将连接状态设为 False，防止其他操作继续使用
+                self.connected = False
+
+                # pymodbus 的 close() 是同步方法
+                self.client.close()
+
+                # 等待一小段时间确保连接完全关闭
+                await asyncio.sleep(0.1)
+
+                # 清理客户端引用
+                self.client = None
+
+                if self.log:
+                    self.log.info("异步 Modbus 客户端已断开连接")
+            except Exception as e:
+                if self.log:
+                    self.log.error(f"断开连接时出错: {e}")
+                self.client = None
+
+    # ===== 报文捕获辅助方法 =====
+
+    def _capture_request(self, request: ModbusRequest):
+        """捕获请求报文"""
+        try:
+            if not self.message_capture:
+                return
+
+            # 构造 PDU (功能码 + 数据)
+            pdu = bytes([request.function_code]) + request.encode()
+
+            # 构造模拟的 MBAP 头部 (为了显示效果)
+            transaction_id = 0
+            protocol_id = 0x0000
+            length = len(pdu) + 1  # PDU长度 + 从机ID
+            unit_id = request.dev_id
+
+            mbap_header = bytearray(
+                [
+                    (transaction_id >> 8) & 0xFF,
+                    transaction_id & 0xFF,
+                    (protocol_id >> 8) & 0xFF,
+                    protocol_id & 0xFF,
+                    (length >> 8) & 0xFF,
+                    length & 0xFF,
+                    unit_id,
+                ]
+            )
+
+            full_request = mbap_header + pdu
+            self.message_capture.add_tx(full_request)
+        except Exception:
+            pass
+
+    def _capture_response(self, response: ModbusResponse, request: ModbusRequest):
+        """捕获响应报文"""
+        try:
+            if not self.message_capture:
+                return
+
+            if response:
+                # 构造响应 PDU
+                response_pdu = bytes([response.function_code]) + response.encode()
+
+                # 构造模拟的 MBAP 头部
+                transaction_id = 0
+                protocol_id = 0x0000
+                length = len(response_pdu) + 1
+                unit_id = request.dev_id
+
+                response_mbap_header = bytearray(
+                    [
+                        (transaction_id >> 8) & 0xFF,
+                        transaction_id & 0xFF,
+                        (protocol_id >> 8) & 0xFF,
+                        protocol_id & 0xFF,
+                        (length >> 8) & 0xFF,
+                        length & 0xFF,
+                        unit_id,
+                    ]
+                )
+
+                full_response = response_mbap_header + response_pdu
+                self.message_capture.add_rx(full_response)
+        except Exception:
+            pass
+
+    # ===== 标准 Modbus 操作 =====
+
+    async def read_holding_registers(self, slave_id: int, address: int, count: int = 1) -> list[int]:
+        """异步读取保持寄存器"""
+        if not self.connected or not self.client:
+            if self.log:
+                self.log.error("客户端未连接")
+            return []
+
+        try:
+            request = ReadHoldingRegistersRequest(address=address, count=count, dev_id=slave_id)
+            self._capture_request(request)
+
+            response = await self.client.execute(False, request)
+
+            self._capture_response(response, request)
+
+            if not response.isError():
+                return response.registers
+            else:
+                if self.log:
+                    self.log.error(f"读取保持寄存器错误: {response}")
+                return []
+        except ModbusException as e:
+            if self.log:
+                self.log.error(f"Modbus 异常: {e}")
+            return []
+
+    async def read_input_registers(self, slave_id: int, address: int, count: int = 1) -> list[int]:
+        """异步读取输入寄存器"""
+        if not self.connected or not self.client:
+            return []
+
+        try:
+            request = ReadInputRegistersRequest(address=address, count=count, dev_id=slave_id)
+            self._capture_request(request)
+
+            response = await self.client.execute(False, request)
+
+            self._capture_response(response, request)
+
+            if not response.isError():
+                return response.registers
+            return []
+        except ModbusException as e:
+            if self.log:
+                self.log.error(f"Modbus 异常: {e}")
+            return []
+
+    async def read_coils(self, slave_id: int, address: int, count: int = 1) -> list[bool]:
+        """异步读取线圈"""
+        if not self.connected or not self.client:
+            return []
+
+        try:
+            request = ReadCoilsRequest(address=address, count=count, dev_id=slave_id)
+            self._capture_request(request)
+
+            response = await self.client.execute(False, request)
+
+            self._capture_response(response, request)
+
+            if not response.isError():
+                return response.bits[:count]
+            return []
+        except ModbusException as e:
+            if self.log:
+                self.log.error(f"Modbus 异常: {e}")
+            return []
+
+    async def read_discrete_inputs(self, slave_id: int, address: int, count: int = 1) -> list[bool]:
+        """异步读取离散输入"""
+        if not self.connected or not self.client:
+            return []
+
+        try:
+            request = ReadDiscreteInputsRequest(address=address, count=count, dev_id=slave_id)
+            self._capture_request(request)
+
+            response = await self.client.execute(False, request)
+
+            self._capture_response(response, request)
+
+            if not response.isError():
+                return response.bits[:count]
+            return []
+        except ModbusException as e:
+            if self.log:
+                self.log.error(f"Modbus 异常: {e}")
+            return []
+
+    async def write_register(self, slave_id: int, address: int, value: int) -> bool:
+        """异步写入单个寄存器"""
+        if not self.connected or not self.client:
+            return False
+
+        try:
+            # WriteSingleRegisterRequest inherits ModbusPDU via WriteSingleRegisterResponse
+            # ModbusPDU init takes 'registers' list, not 'value'
+            request = WriteSingleRegisterRequest(address=address, registers=[value], dev_id=slave_id)
+            self._capture_request(request)
+
+            response = await self.client.execute(False, request)
+
+            self._capture_response(response, request)
+
+            return not response.isError()
+        except ModbusException as e:
+            if self.log:
+                self.log.error(f"Modbus 写入异常: {e}")
+            return False
+
+    async def write_registers(self, slave_id: int, address: int, values: list[int]) -> bool:
+        """异步写入多个寄存器"""
+        if not self.connected or not self.client:
+            return False
+
+        try:
+            request = WriteMultipleRegistersRequest(address=address, registers=values, dev_id=slave_id)
+            self._capture_request(request)
+
+            response = await self.client.execute(False, request)
+
+            self._capture_response(response, request)
+
+            return not response.isError()
+        except ModbusException as e:
+            if self.log:
+                self.log.error(f"Modbus 写入异常: {e}")
+            return False
+
+    async def write_coil(self, slave_id: int, address: int, value: bool) -> bool:
+        """异步写入单个线圈"""
+        if not self.connected or not self.client:
+            return False
+
+        try:
+            # WriteSingleCoilRequest uses 'bits' list in ModbusPDU
+            request = WriteSingleCoilRequest(address=address, bits=[value], dev_id=slave_id)
+            self._capture_request(request)
+
+            response = await self.client.execute(False, request)
+
+            self._capture_response(response, request)
+
+            return not response.isError()
+        except ModbusException as e:
+            if self.log:
+                self.log.error(f"Modbus 写入异常: {e}")
+            return False
+
+    async def write_coils(self, slave_id: int, address: int, values: list[bool]) -> bool:
+        """异步写入多个线圈"""
+        if not self.connected or not self.client:
+            return False
+
+        try:
+            request = WriteMultipleCoilsRequest(address=address, bits=values, dev_id=slave_id)
+            self._capture_request(request)
+
+            response = await self.client.execute(False, request)
+
+            self._capture_response(response, request)
+
+            return not response.isError()
+        except ModbusException as e:
+            if self.log:
+                self.log.error(f"Modbus 写入异常: {e}")
+            return False
+
+    async def read_value_by_address(
+        self,
+        func_code: int,
+        slave_id: int,
+        address: int,
+        decode: str = "INT32_ABCD",
+    ) -> int | float | None:
+        """
+        根据解析码读取寄存器值并解析为指定数据类型
+        """
+        if not self.connected:
+            return None
+
+        # 获取解析码完整信息
+        info = Decode.get_info(decode)
+        register_cnt = info.register_cnt
+
+        values = None
+        registers = None
+
+        # 读取寄存器值
+        # 读取寄存器值
+        if func_code == 1 or func_code == 5 or func_code == 15:  # 读取线圈
+            values = await self.read_coils(slave_id, address, register_cnt)
+            if not values:
+                return None
+            return values[0]
+        elif func_code == 2:  # 读取离散输入
+            values = await self.read_discrete_inputs(slave_id, address, register_cnt)
+            if not values:
+                return None
+            return values[0]
+        elif func_code == 3 or func_code == 6 or func_code == 16:  # 读取保持寄存器
+            registers = await self.read_holding_registers(slave_id, address, register_cnt)
+        elif func_code == 4:  # 读取输入寄存器
+            registers = await self.read_input_registers(slave_id, address, register_cnt)
+        else:
+            if self.log:
+                self.log.error(f"Unsupported function code: {func_code}")
+            return None
+
+        if not registers:
+            return None
+
+        return Decode.decode_registers(decode, registers)
+
+    async def write_value_by_address(
+        self,
+        func_code: int,
+        slave_id: int,
+        address: int,
+        value: int | float,
+        decode: str = "INT32_ABCD",
+    ) -> bool:
+        """
+        根据解析码将值写入寄存器
+        """
+        if not self.connected:
+            return False
+
+        registers = Decode.encode_registers(decode, value)
+
+        # 写入寄存器值
+        if func_code in [1, 5, 15]:  # 线圈操作 (01 读线圈也可转写)
+            return await self.write_coils(slave_id, address, [bool(v) for v in registers])
+        elif func_code in [3, 6, 16]:  # 寄存器操作 (03 读保持寄存器也可转写)
+            if func_code == 6 and len(registers) == 1:
+                return await self.write_register(slave_id, address, registers[0])
+            else:
+                return await self.write_registers(slave_id, address, registers)
+        else:
+            raise ValueError(f"不支持写入的功能码: {func_code}，该测点为只读类型")
+
+    def getCapturedMessages(self, limit: int = 100):
+        """获取捕获的报文"""
+        return self.message_capture.get_messages(limit)
+
+    def clearCapturedMessages(self) -> None:
+        """清空捕获的报文"""
+        self.message_capture.clear()

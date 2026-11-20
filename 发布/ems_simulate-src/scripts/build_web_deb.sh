@@ -1,0 +1,138 @@
+#!/bin/bash
+set -e
+
+# 配置
+APP_NAME="ems-simulate-web"
+# 从 pyproject.toml 读取版本号（单一真相源）
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+VERSION=$(grep -oP '^version\s*=\s*"\K[^"]+' "$SCRIPT_DIR/../pyproject.toml")
+BUILD_DIR="build/build_deb"
+OUTPUT_DIR="dist"
+DEB_DIR="${BUILD_DIR}/${APP_NAME}_${VERSION}_amd64"
+# 修改为 /usr/share (对应 onedir 资源+二进制)
+INSTALL_DIR="${DEB_DIR}/usr/share/${APP_NAME}"
+
+# 切换到项目根目录
+cd "$SCRIPT_DIR/.."
+
+# 同步版本号到 tauri.conf.json 和 package.json
+echo ">>> 同步版本号到配置文件..."
+python "$SCRIPT_DIR/sync_version.py"
+
+echo ">>> 开始构建 ${APP_NAME} v${VERSION}..."
+
+# 1. 清理旧构建 (在 build/ 目录下)
+# 2. 构建前端
+echo ">>> 构建前端..."
+cd front
+if [ ! -d "node_modules" ]; then
+    npm install
+fi
+npm run build:fast
+cd ..
+
+# 检查前端构建结果
+if [ ! -d "www" ]; then
+    echo "错误: 前端构建失败，找不到 www 目录"
+    exit 1
+fi
+
+# 3. 准备 Debian 包结构 (直接复制骨架)
+echo ">>> 准备 Debian 包结构..."
+# 创建构建目录
+mkdir -p "${DEB_DIR}"
+mkdir -p "${INSTALL_DIR}"
+mkdir -p "${DEB_DIR}/usr/bin"
+# 复制 debian 下的所有内容到构建目录
+cp -r debian/* "${DEB_DIR}/"
+
+# 同步版本号到 debian/DEBIAN/control
+echo ">>> 同步版本号到 control 文件..."
+sed -i "s|^Version:.*|Version: ${VERSION}|" "${DEB_DIR}/DEBIAN/control"
+
+# 4. 构建后端 (PyInstaller)
+echo ">>> 构建后端 (PyInstaller)..."
+# 注意: 在 Windows 上运行此命令会生成 .exe，在 Linux 上运行会生成 elf
+# 使用 --onedir 模式，方便包含依赖文件
+# 输出目录修改为 build/dist
+# 获取项目根目录的绝对路径
+PROJECT_ROOT=$(pwd)
+
+EMS_PYINSTALLER_MODE=onedir \
+EMS_PYINSTALLER_NAME="${APP_NAME//-/_}" \
+EMS_PYINSTALLER_CONTENTS_DIR=_internal \
+EMS_PYINSTALLER_BUNDLE_CONFIG=0 \
+EMS_PYINSTALLER_DATA_SCOPE=all \
+EMS_PYINSTALLER_CONSOLE=1 \
+pyinstaller --noconfirm --clean \
+    --distpath "build/dist" \
+    --workpath "build/build_pyinstaller" \
+    "${PROJECT_ROOT}/ems_simulate_backend.spec"
+
+PYINSTALLER_OUTPUT="build/dist/${APP_NAME//-/_}"
+if ! find "$PYINSTALLER_OUTPUT" -type f -name '*_c104*.so' -print -quit | grep -q .; then
+    echo "错误: PyInstaller 产物缺少 c104 原生扩展"
+    exit 1
+fi
+echo ">>> c104 原生扩展检查通过"
+
+# 5. 组装内容
+echo ">>> 组装 Debian 包..."
+# 复制 PyInstaller 生成的内容到 /usr/share/ems-simulate-web
+if ! find "$PYINSTALLER_OUTPUT" -type f -path '*/src/modeling/profile_packages/*/manifest.json' -print -quit | grep -q . ||
+   ! find "$PYINSTALLER_OUTPUT" -type f -path '*/src/modeling/standard_packages/*/manifest.json' -print -quit | grep -q .; then
+    echo "Error: PyInstaller output is missing modeling package manifests"
+    exit 1
+fi
+
+cp -r "${PYINSTALLER_OUTPUT}/"* "$INSTALL_DIR/"
+# 配置只放在程序根目录，并清理复用组装目录时遗留的旧副本。
+cp "${PROJECT_ROOT}/config.ini" "${INSTALL_DIR}/config.ini"
+rm -f "${INSTALL_DIR}/_internal/config.ini"
+
+# 创建 /usr/bin 下的软链接
+ln -sf "../share/${APP_NAME}/${APP_NAME//-/_}" "${DEB_DIR}/usr/bin/${APP_NAME}"
+
+# 更新 Control 文件中的 Installed-Size
+INSTALLED_SIZE=$(du -s "$INSTALL_DIR" | cut -f1)
+sed -i "/^Installed-Size:/d" "${DEB_DIR}/DEBIAN/control" 2>/dev/null || true
+echo "Installed-Size: $INSTALLED_SIZE" >> "${DEB_DIR}/DEBIAN/control"
+
+# 6. 设置权限
+chmod 755 "${DEB_DIR}/DEBIAN/postinst" 2>/dev/null || true
+chmod 755 "${DEB_DIR}/DEBIAN/prerm" 2>/dev/null || true
+chmod 755 "${DEB_DIR}/DEBIAN/postrm" 2>/dev/null || true
+
+# 7. 生成 .deb
+echo ">>> 生成 .deb 文件..."
+mkdir -p build/dist_deb
+dpkg-deb --build "$DEB_DIR" "build/dist_deb/${APP_NAME}_${VERSION}_amd64.deb"
+
+# 定义颜色
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+DEB_OUTPUT="build/dist_deb/${APP_NAME}_${VERSION}_amd64.deb"
+
+echo -e "${YELLOW}🔍 检查deb包${NC}"
+if [ -f "$DEB_OUTPUT" ]; then
+    echo -e "${GREEN}✅ deb包构建成功！${NC}"
+    echo -e "${BLUE}📁 包位置: $DEB_OUTPUT${NC}"
+    echo ""
+    echo -e "${BLUE}📄 包信息:${NC}"
+    dpkg-deb --info "$DEB_OUTPUT"
+    echo ""
+    echo -e "${BLUE}📁 包内容:${NC}"
+    dpkg-deb --contents "$DEB_OUTPUT"
+    echo ""
+    echo -e "${GREEN}🎉 构建完成！${NC}"
+    echo -e "${BLUE}安装命令: sudo dpkg -i $DEB_OUTPUT${NC}"
+    echo -e "${BLUE}卸载命令: sudo dpkg -r ${APP_NAME}${NC}"
+    echo -e "${YELLOW}完全清除(含数据): sudo dpkg -P ${APP_NAME}${NC}"
+else
+    echo -e "${RED}❌ deb包构建失败${NC}"
+    exit 1
+fi

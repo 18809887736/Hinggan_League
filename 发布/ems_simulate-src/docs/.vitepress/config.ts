@@ -1,0 +1,294 @@
+import { defineConfig } from 'vitepress'
+
+export default defineConfig({
+    // 站点基础配置
+    title: 'EMS Simulate',
+    description: '能源管理系统模拟器 - 项目文档',
+
+    // 配置浏览器标签页图标
+    head: [
+        ['link', { rel: 'icon', href: '/ems_simulate/img/m.ico' }]
+    ],
+
+    // GitHub Pages 部署路径
+    base: '/ems_simulate/',
+
+    // 主题配置
+    themeConfig: {
+        logo: '/img/m.ico',
+
+        // 导航栏
+        nav: [
+            { text: '首页', link: '/' },
+            { text: '快速开始', link: '/guide/install/getting-started' },
+            { text: 'API 参考', link: '/api/overview' },
+            { text: '更新日志', link: '/changelog/' },
+            { text: 'GitHub', link: 'https://github.com/600888/ems_simulate' }
+        ],
+
+        // 侧边栏
+        sidebar: {
+            '/guide/': [
+                {
+                    text: '关于项目',
+                    collapsed: false,
+                    items: [
+                        { text: '项目介绍', link: '/guide/about/project-introduction' }
+                    ]
+                },
+                {
+                    text: '安装部署',
+                    collapsed: false,
+                    items: [
+                        { text: '快速开始', link: '/guide/install/getting-started' },
+                        { text: '安装指南', link: '/guide/install/installation' },
+                        { text: '配置说明', link: '/guide/install/configuration' },
+                        { text: 'Debian 打包与部署', link: '/guide/install/packaging_deb' },
+                    ]
+                },
+                {
+                    text: '协议支持',
+                    collapsed: false,
+                    items: [
+                        { text: '协议总览', link: '/guide/protocols/' },
+                        {
+                            text: 'Modbus TCP / RTU',
+                            collapsed: false,
+                            items: [
+                                { text: '协议介绍', link: '/guide/protocols/modbus/' },
+                                { text: '操作指南', link: '/guide/protocols/modbus/operation' },
+                                { text: '报文查看', link: '/guide/protocols/modbus/packet-view' }
+                            ]
+                        },
+                        {
+                            text: 'IEC 60870-5-104',
+                            collapsed: false,
+                            items: [
+                                { text: '协议介绍', link: '/guide/protocols/iec104/' },
+                                { text: '操作指南', link: '/guide/protocols/iec104/operation' },
+                                { text: '报文查看', link: '/guide/protocols/iec104/packet-view' }
+                            ]
+                        },
+                        {
+                            text: 'DL/T 645-2007',
+                            collapsed: false,
+                            items: [
+                                { text: '协议介绍', link: '/guide/protocols/dlt645/' },
+                                { text: '操作指南', link: '/guide/protocols/dlt645/operation' },
+                                { text: '报文查看', link: '/guide/protocols/dlt645/packet-view' }
+                            ]
+                        },
+                        {
+                            text: 'OPC UA',
+                            collapsed: false,
+                            items: [
+                                { text: '协议介绍', link: '/guide/protocols/opcua/' },
+                                { text: '操作指南', link: '/guide/protocols/opcua/operation' },
+                                { text: '报文与诊断查看', link: '/guide/protocols/opcua/packet-view' }
+                            ]
+                        },
+                        {
+                            text: 'IEC 61850',
+                            collapsed: false,
+                            items: [
+                                { text: '协议介绍', link: '/guide/protocols/iec61850/' },
+                                { text: '操作指南', link: '/guide/protocols/iec61850/operation' },
+                                { text: '报文查看', link: '/guide/protocols/iec61850/packet-view' },
+                                { text: 'GOOSE 跨平台收发与自发自收', link: '/guide/protocols/iec61850/goose-cross-platform' }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    text: '设备模块',
+                    collapsed: false,
+                    items: [
+                        { text: '设备管理', link: '/guide/device/device-management' },
+                        { text: '设备复制', link: '/guide/device/device-copy' },
+                        { text: '从机管理', link: '/guide/device/slave-management' }
+                    ]
+                },
+                {
+                    text: '测点模块',
+                    collapsed: false,
+                    items: [
+                        { text: '测点类型', link: '/guide/point/point-types' },
+                        { text: '测点增删改查', link: '/guide/point/crud' },
+                        { text: '测点模拟', link: '/guide/point/simulation' },
+                        { text: '测点映射', link: '/guide/point/mapping' },
+                        { text: '公式使用', link: '/guide/point/formula' },
+                        { text: '寄存器解析', link: '/guide/point/register-parsing' },
+                        { text: '变化回溯', link: '/guide/point/change-tracking' }
+                    ]
+                },
+                {
+                    text: '数据模拟',
+                    collapsed: false,
+                    items: [
+                        { text: '测点配置', link: '/guide/simulation/point-config' },
+                        { text: '数据监视', link: '/guide/simulation/data-monitor' }
+                    ]
+                }
+                // {
+                //     text: '操作手册',
+                //     collapsed: false,
+                //     items: [
+                //         { text: '用户使用手册', link: '/guide/manual/user-manual' }
+                //     ]
+                // }
+            ],
+            '/api/': [
+                {
+                    text: 'API 参考',
+                    collapsed: false,
+                    items: [
+                        { text: '概述', link: '/api/overview' },
+                        { text: '设备管理', link: '/api/device' },
+                        { text: '测点操作', link: '/api/points' }
+                    ]
+                }
+            ],
+            '/changelog/': [
+                {
+                    text: '更新日志',
+                    collapsed: false,
+                    items: [
+                        { text: '总览', link: '/changelog/' }
+                    ]
+                },
+                {
+                    text: '功能模块变更',
+                    collapsed: false,
+                    items: [
+                        { text: 'Ruff 代码质量工具引入', link: '/changelog/03-ruff-introduction-plan' },
+                        { text: 'Web API 层重构', link: '/changelog/02-api-refactoring' },
+                        { text: 'IEC104 全 ASDU 类型支持', link: '/changelog/01-iec104-asdu-type-support' }
+                    ]
+                },
+                {
+                    text: 'IEC 61850',
+                    collapsed: false,
+                    items: [
+                        {
+                            text: '核心架构',
+                            collapsed: false,
+                            items: [
+                                { text: '数据存储与协议流程整改', link: '/changelog/iec61850/18-iec61850-data-storage-optimization-plan' },
+                                { text: '统一模型架构重构', link: '/changelog/iec61850/09-iec61850-unified-model-refactoring' },
+                                { text: '模块化重构计划', link: '/changelog/iec61850/02-iec61850-refactoring-plan' }
+                            ]
+                        },
+                        {
+                            text: 'GOOSE',
+                            collapsed: false,
+                            items: [
+                                { text: '专题总览', link: '/changelog/iec61850/goose/' },
+                                { text: '接收、历史与抓包链路重构', link: '/changelog/iec61850/goose/04-receive-history-capture-refactoring' },
+                                { text: '按设备作用域全栈重构', link: '/changelog/iec61850/25-goose-device-scoped-refactoring' },
+                                { text: '模块插件化重构', link: '/changelog/iec61850/06-goose-plugin-refactoring' },
+                                { text: '功能支持', link: '/changelog/iec61850/01-goose-support' }
+                            ]
+                        },
+                        {
+                            text: 'Reports',
+                            collapsed: false,
+                            items: [
+                                { text: '报告功能', link: '/changelog/iec61850/03-iec61850-reports-support' },
+                                { text: 'Reports 树形数据展示重构', link: '/changelog/iec61850/17-iec61850-report-tree-ui-refactoring' },
+                                { text: '报告回调崩溃与禁用修复', link: '/changelog/iec61850/15-iec61850-report-callback-crash-fix' },
+                                { text: '报告 GI 与 DataSet 读取修复', link: '/changelog/iec61850/16-iec61850-report-gi-dataset-read-fix' },
+                                { text: '服务端总召唤与主动报告修复', link: '/changelog/iec61850/19-iec61850-server-gi-spontaneous-report-fix' },
+                                { text: 'DataSet 批读进度与软件 GI', link: '/changelog/iec61850/22-iec61850-dataset-batch-read-progress-gi-fix' },
+                                { text: '报告与 DataModel 并发修复', link: '/changelog/iec61850/23-iec61850-report-datamodel-concurrency-crash-fix' }
+                            ]
+                        },
+                        {
+                            text: '模型与发现',
+                            collapsed: false,
+                            items: [
+                                { text: 'SCL 文件模块（历史）', link: '/changelog/iec61850/04-iec61850-scl-file-module' },
+                                { text: '文件下载服务模块', link: '/changelog/iec61850/05-iec61850-file-download-module' },
+                                { text: 'SCL 重构实施（历史）', link: '/changelog/iec61850/07-iec61850-scl-refactoring-implementation' },
+                                { text: '模型导出优化（历史）', link: '/changelog/iec61850/08-iec61850-model-export-optimization' },
+                                { text: '元数据按需读取', link: '/changelog/iec61850/12-iec61850-metadata-reader' },
+                                { text: '测点注册表精简优化', link: '/changelog/iec61850/11-iec61850-point-registry-optimization' },
+                                { text: 'ICD 导出器修复', link: '/changelog/iec61850/14-iec61850-icd-exporter-fix' },
+                                { text: 'MMS 类型识别与标签优化', link: '/changelog/iec61850/21-iec61850-mms-type-tag-ui' },
+                                { text: '模型发现与 MMS 类型推断优化', link: '/changelog/iec61850/26-iec61850-discovery-mms-type-performance-fix' }
+                            ]
+                        },
+                        {
+                            text: '性能与稳定性',
+                            collapsed: false,
+                            items: [
+                                { text: '超大模型性能、超时与服务状态治理', link: '/changelog/iec61850/24-iec61850-large-model-performance-timeout-fix' },
+                                { text: '客户端模型发现进度修复', link: '/changelog/iec61850/20-iec61850-client-discovery-progress-fix' },
+                                { text: '模型发现性能优化', link: '/changelog/iec61850/13-iec61850-discovery-performance-optimization' }
+                            ]
+                        },
+                        {
+                            text: '界面与交互',
+                            collapsed: true,
+                            items: [
+                                { text: 'IEC 61850 前端 UI 设计', link: '/changelog/iec61850/10-iec61850-frontend-ui-design' }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    text: '软件优化',
+                    collapsed: false,
+                    items: [
+                        { text: 'MSIX 后端启动修复', link: '/changelog/optimization/msix-backend-startup-fix' },
+                        { text: '消除应用启动黑框', link: '/changelog/optimization/startup-black-screen-elimination' }
+                    ]
+                }
+            ]
+        },
+
+        // 社交链接
+        socialLinks: [
+            { icon: 'github', link: 'https://github.com/600888/ems_simulate' }
+        ],
+
+        // 页脚
+        footer: {
+            message: 'Released under the Apache 2.0 License.',
+            copyright: 'Copyright © 2026 CDY'
+        },
+
+        // 搜索
+        search: {
+            provider: 'local'
+        },
+
+        // 编辑链接
+        editLink: {
+            pattern: 'https://github.com/600888/ems_simulate/edit/main/docs/:path',
+            text: '在 GitHub 上编辑此页'
+        },
+
+        // 最后更新时间
+        lastUpdated: {
+            text: '最后更新'
+        },
+
+        // 中文配置
+        docFooter: {
+            prev: '上一页',
+            next: '下一页'
+        },
+        outline: {
+            label: '页面导航'
+        }
+    },
+
+    // 语言配置
+    lang: 'zh-CN',
+
+    // Markdown 配置
+    markdown: {
+        lineNumbers: true,
+        math: true
+    }
+})
