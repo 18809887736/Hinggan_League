@@ -124,10 +124,31 @@ docker compose -f ..\ems-simulate-docker\docker-compose.yml up -d
 
 > 实测教训：save/load 搬旧镜像会把容器内热修类补丁弄丢（77.7 落库成 77.0），补丁必须固化进镜像重建，不能只热修容器。
 
-## 与 DUT 的对接（麒麟 VM 侧，非本包内容）
+## 与 DUT 的对接（麒麟 VM 侧）
 
-- DUT 程序：`/home/syth/QCzt2016/build/qplantagcserver`（VM 重启后手动拉起）。
-- PORT_NET 已改指本机：ch4→10.0.0.7:502、ch1 主对端→10.0.0.7:2404（改前备份 `qplantagcrtdb.db.bak-20261120-portnet`）。
+### DUT 实时库（qplantagcrtdb.db）需要的修改
+
+DUT 实时库是 SQLite（`qplantagcrtdb.db`），网络参数在 **PORT_NET** 表（列：`chunnel_num, local_address, local_port, remote_address, remote_port`）。铁律：**程序停止后改库、改前备份、改完重启 DUT 生效**。2026-11-20 迁移时已按此做过（备份 `qplantagcrtdb.db.bak-20261120-portnet`），全新环境或换回现场地址时用同样的两条 UPDATE：
+
+```sql
+-- 备份：cp qplantagcrtdb.db qplantagcrtdb.db.bak-<日期>
+
+-- ① ch4 PLC 通道 → 仿真器 Modbus（原现场地址 192.192.192.31:502）
+UPDATE PORT_NET SET remote_address='10.0.0.7', remote_port=502 WHERE chunnel_num=4;
+
+-- ② ch1 NCS采集主对端 → 仿真器 IEC104 服务端（原 10.0.0.88:2404；备对端 196.5.1.216 故意留为不可达）
+UPDATE PORT_NET SET remote_address='10.0.0.7' WHERE chunnel_num=1 AND remote_address='10.0.0.88';
+```
+
+- ch0/ch5（转发服务端，监听 2404）由主站-仿真主动连入，**DUT 侧无需修改**。
+- **ch3（远方/就地源通道）**：2026-11-20 应要求已删除其 PORT_NET 行（备份 `qplantagcrtdb.db.bak-20261120-delch3`），删后 yx30 由 65（远方）→192（就地），**AGC 远方调节断源**。需要 AGC 远方路径时重建并重启 DUT：`INSERT INTO PORT_NET VALUES(3,'0.0.0.0',0,'10.0.0.7',2404);`，并按联调记录-20261114.md §七 补齐 chunnel 注册行与 CHUNNEL_YX IOA 映射（仿真器侧需有 YX50 点、模拟方式=不模拟）。
+
+### DUT 重启规程（每次改库/重启后）
+
+- kill 后**必须静置 ≥60s** 再启动（紧跟 kill 启动会卡死 installTranslator）；进程可能曾被以 root 启动，syth 用户 kill 会 EPERM，需 `sudo -S kill`。
+- 启动用 nohup 必须带 `< /dev/null`：`nohup /home/syth/QCzt2016/build/qplantagcserver < /dev/null &`。
+- 重启后 HMI 登录态丢失（账号 fzy/777777）；AGC 投入序列见联调记录-20261114.md（关键扳机：总控参数「MEGC 允许调节」退出→投入翻一遍）。
+- 核验：DUT relate_yx 101/102/107=65（通信正常）；「改仿真遥测值 → ≤60s 落库」是链路体检口诀。
 - 备通道（ch5）如需验证 relate_yx 108 与主备切换，用 `/api/channels/copy` 复制主站-仿真即可补齐。
 
 ## 许可
