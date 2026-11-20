@@ -184,3 +184,6 @@ ems-simulate-docker/config.ini
 ems-simulate-docker/data/
 ems-simulate-docker/dumps/
 ems-simulate-docker/*.tar.gz
+
+# 发布镜像 tar 包走拷贝/ssh 分发，不入库（GitHub 单文件 100MB 上限）
+发布/*.tar
