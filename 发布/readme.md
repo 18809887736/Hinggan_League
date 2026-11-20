@@ -3,7 +3,6 @@
 > 无现场环境下联调 / 回归测试 qplantagc（AGC 子站）的多规约仿真工具部署物料与源码。
 > 本包只扮演 qplantagc 的对端（PLC/DCS、NCS、上级主站），qplantagc 是被测端（DUT），
 > 一切验收以被测端的行为表现为准。
-> 基于 [ems_simulate](https://github.com/600888/ems_simulate)（GPL-3.0）二次开发，内部测试使用，不得闭源外发。
 
 ## 包内容清单
 
@@ -150,7 +149,3 @@ UPDATE PORT_NET SET remote_address='10.0.0.7' WHERE chunnel_num=1 AND remote_add
 - 重启后 HMI 登录态丢失（账号 fzy/777777）；AGC 投入序列见联调记录-20261114.md（关键扳机：总控参数「MEGC 允许调节」退出→投入翻一遍）。
 - 核验：DUT relate_yx 101/102/107=65（通信正常）；「改仿真遥测值 → ≤60s 落库」是链路体检口诀。
 - 备通道（ch5）如需验证 relate_yx 108 与主备切换，用 `/api/channels/copy` 复制主站-仿真即可补齐。
-
-## 许可
-
-ems_simulate 上游为 GPL-3.0；本包仅限内部测试使用，不得闭源外发。
