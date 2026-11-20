@@ -1,0 +1,12 @@
+services:
+  backend:
+    image: ems-simulate:xam
+    container_name: ems-simulate
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8991:8991"   # REST / Web UI（仅本机）
+      - "10.0.0.7:502:502"      # PLC-仿真 (Modbus TCP 服务端, 从站1) — 麒麟 DUT 连入
+      - "10.0.0.7:2404:2404"    # NCS-仿真 (IEC104 服务端, CA=257) — 麒麟 DUT 连入
+    volumes:
+      - ./data:/app/data                 # 运行时落盘（SQLite 已退役，兜底目录）
+      - ./config.ini:/app/config.ini:ro  # 监听/数据库配置

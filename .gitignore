@@ -179,3 +179,8 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# ems-simulate 本地运行现场：密码与数据快照不入库
+ems-simulate-docker/config.ini
+ems-simulate-docker/data/
+ems-simulate-docker/dumps/
+ems-simulate-docker/*.tar.gz
