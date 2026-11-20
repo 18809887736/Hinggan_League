@@ -13,17 +13,18 @@
 | `ems-simulate-docker/` | 运行目录：`docker-compose.yml` + `config.ini`（LF 行尾）+ `xamapi-local.py`（本机 API 辅助脚本）+ `dumps/`（net 库备份）+ `data/`（运行时落盘兜底目录） |
 | `ems_simulate-src/` | 完整源码树（84MB），含 `wheels/`（离线构建关键物料）、`Dockerfile`、`requirements-docker.txt`（冻结依赖清单），可用于重建镜像或二次开发 |
 
-数据库快照（在 `ems-simulate-docker/dumps/`）：
-- `net_dump-20261120-release.sql` — 发布时点全量快照（含 `CREATE DATABASE net`）
-- `net_dump-final-20261120.sql` — 迁移完成时的快照
-- `build.log` — 本机镜像构建日志（重建时可对照）
+数据库快照（`net.sql` 为权威快照，另在 `ems-simulate-docker/dumps/` 留有历史版本）：
+- `net.sql`（包根目录）— 发布时点全量快照（含 `CREATE DATABASE net`），恢复部署用这一份
+- `ems-simulate-docker/dumps/net_dump-20261120-release.sql` — 与 `net.sql` 同源
+- `ems-simulate-docker/dumps/net_dump-final-20261120.sql` — 迁移完成时的快照
+- `ems-simulate-docker/dumps/build.log` — 本机镜像构建日志（重建时可对照）
 
 ## 架构与角色
 
 | 容器 | 作用 | 端口 |
 |---|---|---|
 | `ems-simulate`（镜像 `ems-simulate:xam`） | 协议仿真器后端（Python 3.12 + FastAPI），扮演 qplantagc 的三个对端 | `10.0.0.7:502`（Modbus）、`10.0.0.7:2404`（IEC104，DUT 连入）、`127.0.0.1:8991`（REST/Web，仅本机） |
-| `mysql84`（官方 `mysql:8.4.11`） | 仿真器数据库（库名 `net`） | `127.0.0.1:3306`，root/syth7777 |
+| `mysql84`（**10.0.0.9 上的容器**，官方 `mysql:8.4`） | 仿真器数据库（库名 `net`），跑在远端主机 myubuntu | `10.0.0.9:3306`，root/syth7777，root 允许远程（root@'%') |
 
 已建设的三台仿真设备（配置持久化在 `net` 库中，随 dump 恢复）：
 
@@ -35,26 +36,28 @@
 
 ## 前置条件
 
-- Windows 本机装有 Docker Desktop（容器自启即随其恢复）。
-- 官方镜像 `mysql:8.4.11`（`docker pull mysql:8.4.11`，需外网；内网环境请提前导入）。
-- 本机需有 `10.0.0.7` IP（与麒麟 DUT 同网段；DUT 侧 PORT_NET 已改指 10.0.0.7:502 / 10.0.0.7:2404）。
+- Windows 本机装有 Docker Desktop（跑 `ems-simulate` 容器，容器自启即随其恢复）；**本机不需要装 MySQL**。
+- 数据库在远端：10.0.0.9（myubuntu，Ubuntu 22.04）上的 `mysql84` 容器（官方 `mysql:8.4`，3306 绑 0.0.0.0 发布）。`config.ini` 里 `host = 10.0.0.9` 直接走容器→宿主机网卡 IP 的路由（前提正是 3306 在 10.0.0.9 上监听）。
+- 本机需有 `10.0.0.7` IP（与麒麟 DUT 及 10.0.0.9 同网段；DUT 侧 PORT_NET 已改指 10.0.0.7:502 / 10.0.0.7:2404）。
 - Windows 防火墙 2 条入站规则：放行 502 / 2404，远程地址限 10.0.0.0/24。
 
 ## 部署步骤
 
-```powershell
-# 1. 启动 MySQL 容器（本机无 mysql84 时；名字/密码/端口见上表）
-docker run -d --name mysql84 --restart unless-stopped -p 127.0.0.1:3306:3306 -e MYSQL_ROOT_PASSWORD=syth7777 mysql:8.4.11
+```bash
+# 1. 在 10.0.0.9 (myubuntu) 上确保 mysql84 运行（ssh 到远端执行；已存在则 docker start 即可）
+docker start mysql84
+# 无 mysql84 时才需要新建（绑 0.0.0.0:3306，密码见架构表）：
+# docker run -d --name mysql84 --restart unless-stopped -p 3306:3306 -e MYSQL_ROOT_PASSWORD=syth7777 mysql:8.4
 ```
 
 ```powershell
-# 2. 导入仿真器镜像
+# 2. 导入仿真器镜像（本机 Docker Desktop）
 docker load -i ems-simulate-xam-image.tar
 ```
 
 ```powershell
-# 3. 恢复 net 库（dump 自带 CREATE DATABASE；容器需先跑起来）
-Get-Content ems-simulate-docker\dumps\net_dump-20261120-release.sql -Raw | docker exec -i mysql84 mysql -uroot -psyth7777 --default-character-set=utf8mb4
+# 3. 恢复 net 库到 10.0.0.9 的 mysql84（dump 自带 CREATE DATABASE；在包根目录执行）
+Get-Content net.sql -Raw | ssh syth@10.0.0.9 "docker exec -i mysql84 mysql -uroot -psyth7777 --default-character-set=utf8mb4"
 ```
 
 ```powershell
@@ -75,11 +78,12 @@ python xamapi-local.py gi master         # 主站发起总召唤，收到转发�
 ```powershell
 # 容器健康（Docker Desktop 冒烟怪癖：宿主机自连 10.0.0.7:502/2404 会超时，属端口代理怪癖，冒烟走容器内或 DUT 侧）
 docker ps                              # ems-simulate 应为 Up (healthy)
-docker exec ems-simulate curl -s http://127.0.0.1:8991/api/health
+docker exec ems-simulate python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8991/api/health',timeout=5).read().decode())"
+# 容器里没有 curl；health 返回 database":"mysql" 即已连上 10.0.0.9 的库
 ```
 
 - Web/REST：浏览器开 `http://127.0.0.1:8991`。
-- API 辅助：`python xamapi-local.py vals master yc101` 之类读值；全部子命令见脚本 usage。
+- API 辅助：`python xamapi-local.py vals master YC101` 之类读值；全部子命令见脚本 usage。**点码是大写格式**（库 `net.point_yc.code` 存 `YC512`），传小写 `yc512` 会返回空。
 - **连本容器主机一律写 `127.0.0.1`，勿写 `localhost`**（::1 被 Docker 端口代理黑洞，连接卡约 10 秒）。
 - **API 中文请求体必须走 Python UTF-8**（用 `xamapi-local.py`，curl -d 中文会被 Windows 控制台编码弄坏）。
 - DUT 侧核验：麒麟 VM 的 qplantagc relate_yx 应为 101/102/107=65（通信正常）。
@@ -93,6 +97,7 @@ docker exec ems-simulate curl -s http://127.0.0.1:8991/api/health
 5. C_SE 数值存在约 0.07% 系数往返误差（系数 0.171 双向换算所致，如 300→299.93），属正常。
 6. `net.point_yc/point_yt` 的 104 点需带 `iec_type_id`（yc=M_ME_NC_1、主站 yt=C_SE_NC_1）；迁移/导入后核验一次（本包 dump 已带）。
 7. 镜像标签 `ems-simulate:xam` 若被旧版占用，`docker load` 会跳过重名——先 `docker rmi` 清掉或改 tag 后再 load。
+8. 数据库指向原理：`config.ini` 的 `host` 必须写「宿主机上确实监听着的地址」。10.0.0.9 的 mysql84 绑 0.0.0.0 → 写 `10.0.0.9`；若哪天改回本机 Docker Desktop 的 mysql（绑 127.0.0.1 发布）→ 必须写 `host.docker.internal`，而本机网卡 IP `10.0.0.7` 反而不通（127.0.0.1 上才有监听）。容器内永远不能写 `127.0.0.1`（那是容器自己）。
 
 ## 镜像重建（源码改过之后）
 
