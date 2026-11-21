@@ -188,3 +188,10 @@ ems-simulate-docker/*.tar.gz
 # 发布镜像 tar 包走拷贝/ssh 分发，不入库（GitHub 单文件 100MB 上限）
 发布/*.tar
 发布/**/*.tar
+
+# 模板规则误伤的应入库文件（放行）：
+# PyInstaller 构建入口 spec——方案 B 依赖，曾被 *.spec 挡在库外，GitHub 克隆看不到导致误判"未找到"
+!发布/old/ems_simulate-src/ems_simulate_backend.spec
+!ems_simulate/ems_simulate_backend.spec
+# Docker 镜像重建用的预编译 wheel——CLAUDE.md 要求入库，曾被 wheels/ 静默忽略（磁盘有、库里无）
+!ems_simulate/wheels/

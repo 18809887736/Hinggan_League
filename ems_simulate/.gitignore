@@ -243,3 +243,6 @@ plan/IEC61850/modeling/*
 plan/assets/*
 !plan/assets/网络接口.png
 reasonix.toml
+
+# 本仓库特例（上游勿仿）：Docker 镜像重建依赖的预编译 wheel 需入库，放行上方 wheels/ 规则
+!wheels/
