@@ -195,3 +195,12 @@ ems-simulate-docker/*.tar.gz
 !ems_simulate/ems_simulate_backend.spec
 # Docker 镜像重建用的预编译 wheel——CLAUDE.md 要求入库，曾被 wheels/ 静默忽略（磁盘有、库里无）
 !ems_simulate/wheels/
+
+# Windows 原生 onedir 运行态：运行根=仓库根（data/log/config/plan/upload/config.ini，见规划文档 §14）；
+# exe 在 ems_simulate/dist（联想杀软按 exe 位置拦截未签名程序，dist 为受信位置，勿移根目录）
+/data/
+/log/
+/config/
+/plan/
+/upload/
+/config.ini

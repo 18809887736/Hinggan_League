@@ -169,7 +169,9 @@ spec 首次在 Windows 上真实构建并冒烟通过，"spec 是否可用"疑�
 
 ## 14. P0–P4 实测记录（2026-11-21，Leo 本机 10.0.0.7 对 DUT 10.0.0.194）
 
-方案 B onedir 从构建到对 DUT 验收全链路一次跑通，运行目录 `C:\tmp\ems-win-run`（exe + 旁置 config.ini/sqlite + data/ems.db）。
+方案 B onedir 从构建到对 DUT 验收全链路一次跑通。**运行布局（2026-11-21 定版）：运行根 = 仓库根 `C:\work\Hinggan_League`（config.ini / data / log / config / plan / upload，均 gitignore），exe 留在 `ems_simulate/dist/ems_simulate_backend/`，启动命令：`$env:EMS_ROOT_DIR='C:\work\Hinggan_League'; & 'C:\work\Hinggan_League\ems_simulate\dist\ems_simulate_backend\ems_simulate_backend.exe'`**；API 助手 `sim_config/ems_local.py`（BASE=127.0.0.1:8991）。
+
+- **⚠ 杀软新坑（布局由此定型）**：本机联想电脑管家（火绒引擎）**按 exe 位置拦截未签名程序的文件写入**——exe 放仓库根或新建子目录都报 PermissionError（python 等解释器进程放行，极具迷惑性），而 `ems_simulate/dist` 是受信位置。因此 exe 不搬家、运行根用 `EMS_ROOT_DIR` 重定向；替代方案是在杀软 UI 加白名单。
 
 - **P0**：10.0.0.9 mysql84 最终 dump 72KB（`发布/old/ems-simulate-docker/dumps/net_dump_final_20261121.sql`），计数 device=3 / point_mapping=8 / point_yc=78。
 - **P2**：迁移脚本在 10.0.0.9 ems-simulate 容器内实跑，24 表逐表对账全 OK、外键检查 OK（connection_session 为运行态数据，表结构保留、行清空）。踩坑两处：MySQL 方言类型（TINYINT 等）需转通用类型再 create_all；SA 2.0 无 `Table.count()`。
@@ -179,6 +181,6 @@ spec 首次在 Windows 上真实构建并冒烟通过，"spec 是否可用"疑�
   2. ✓ yc512=200.0、yc513=-555.0、yc222=77.7 精确落库（补丁④小数保真）；
   3. ✓ CA=257 服务端正常（由 102=65 与浮点数据隐含证明）；
   4. ✓ 闭环六环：主站 YS5=100 → DUT AGC 计算（yc101=99.864，与 2026-11-14 联调记录同值复现）→ 06 写 YS1/4/6/7=123/300/700/400 → 8 条映射回灌 → DUT 回读 yc301/303/305/307 与 yc501/601/901/1001 全对 → 转发上行（主站总召收到 YC101=100.0）。功率反馈 4 条跨设备映射在 SQLite 上工作正常。
-- **专项疑点已答**：设备级 stop→start 假活在**原生 Windows 同样复现**，且比 Docker 版更完整地看清了机理——`channels/restart` 后 API 报成功、iec104.log 只有"已停止"无"已启动"；此后仿真整进程重启能重建 2404 监听（新进程持有 socket），**但 DUT 侧 ch1 卡 CLOSE-WAIT 极久不重连**（与 Docker 时代"102 停 192 半小时"同款；主站/Modbus 通道不受影响、自动恢复）。**完整恢复配方 = 仿真整进程重启 + DUT 重启**（实测：DUT 重启后 ch1 即刻重连）。
+- **专项疑点已答**：设备级 stop→start 假活在**原生 Windows 同样复现**，且比 Docker 版更完整地看清了机理——`channels/restart` 后 API 报成功、iec104.log 只有"已停止"无"已启动"；此后仿真整进程重启能重建 2404 监听（新进程持有 socket），**但 DUT 侧 ch1 卡 CLOSE-WAIT 极久不重连**（两次实证：ch1 对不干净断线永不自愈，而 Modbus ch4 与主站客户端均自动恢复——**任何仿真停机后都需重启 DUT**）。**完整恢复配方 = 仿真整进程重启 + DUT 重启（kill → 静置 65s → 拉起）**。
 - **恢复链定版（原生版，13 秒完成实测）**：taskkill exe → 重启 → start×3 → **立刻写点值（抢在 DUT 重连总召之前，窗口约 30s）** → autoread + gi。竞态教训：DUT 只认总召响应、运行值不自发上送、也不主动周期总召——写值晚于 DUT 重连总召则值停在 0；反之预写值会被 DUT 重启后的总召正确拾取（实测 88.8 于 DUT 重启重连后 19 秒落库）。
 - 待办：24h 稳定性观察（§7 第 6 条）与 P5 正式割接交付。
