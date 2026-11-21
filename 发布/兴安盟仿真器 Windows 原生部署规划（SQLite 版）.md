@@ -1,6 +1,6 @@
 # 兴安盟仿真器 Windows 原生部署规划（SQLite 版）
 
-> 状态：规划稿。P1 的方案 B 构建验证已于 2026-11-21 实施（见第 13 节），其余阶段尚未实施。本文只描述方案、步骤与验收。 范围：把 ems\_simulate 仿真器部署到同公司同事的 Windows 机器上，不使用 Docker Desktop，数据库由 MySQL 改为 SQLite，并以 SQLite 版作为今后的主线。
+> 状态：规划稿。P1（方案 B 构建验证）与 P0–P4 全链路已于 2026-11-21 在 Leo 本机对 DUT 实施并通过验收（见第 13、14 节），P5 割接交付与 24h 稳定性观察待做。 范围：把 ems\_simulate 仿真器部署到同公司同事的 Windows 机器上，不使用 Docker Desktop，数据库由 MySQL 改为 SQLite，并以 SQLite 版作为今后的主线。
 
 ## 1. 目标与前提
 
@@ -76,7 +76,7 @@
 
 ## 5. SQLite 迁移要点
 
-- 大小写敏感：MySQL 使用 `utf8mb4_0900_ai_ci`（不区分大小写），SQLite 默认区分。设备名、通道名等按名称查找的地方要逐一核对，必要时对相关列加 `COLLATE NOCASE`。
+- 大小写敏感：MySQL 使用 `utf8mb4_0900_ai_ci`（不区分大小写），SQLite 默认区分。~~必要时对相关列加 `COLLATE NOCASE`~~ **（2026-11-21 实测修正：无效）**——测点查找走运行时内存字典精确匹配（`point_manager.get_point_by_code`），SQL 层 collation 不参与；**正确做法是 API 调用一律用库内大小写（点号全大写，如 `YC512` 而非 `yc512`）**。迁移脚本仍给 code/name 列加了 NOCASE（对直接 SQL 查询友好，无害）。
 - 布尔与时间类型：`tinyint` 转 bool，datetime 格式保持一致。
 - 外键：SQLite 连接会开启 `PRAGMA foreign_keys=ON`，插入需按依赖顺序，孤儿行提前清理。
 - 字段保真：`iec_type_id`（yc 为 M\_ME\_NC\_1、主站 yt 为 C\_SE\_NC\_1）、`decode_code`（Modbus 为 INT16\_AB，NCS 104 为 FLOAT32\_ABCD）、`enable`、8 条映射的公式，迁完后逐项抽检。
@@ -165,4 +165,20 @@ spec 首次在 Windows 上真实构建并冒烟通过，"spec 是否可用"疑�
   1. onedir 模式按设计**不打包 config.ini**（spec 的 `BUNDLE_CONFIG` 默认 off），需在 exe 旁放可编辑配置（复制后正常读取，已验证）；
   2. health 报 `version 0.0.0`——冻结环境丢包元数据，纯外观问题；
   3. `/docs` 与裸 `/api/devices` 前缀 404 属正常（子路径路由 + 未开 docs），非缺陷。
-- 产物在 `ems_simulate/dist`（gitignored，未入库，不需要可直接删）。
+- 产物在 `ems_simulate/dist`（gitignored，未入库，不需要可直接删）。一键重打包脚本：`ems_simulate/scripts/rebuild_onedir.ps1`；迁移脚本：`sim_config/migrate_to_sqlite.py`（在 10.0.0.9 容器内跑，读 mysql84 写 SQLite，逐表对账）。
+
+## 14. P0–P4 实测记录（2026-11-21，Leo 本机 10.0.0.7 对 DUT 10.0.0.194）
+
+方案 B onedir 从构建到对 DUT 验收全链路一次跑通，运行目录 `C:\tmp\ems-win-run`（exe + 旁置 config.ini/sqlite + data/ems.db）。
+
+- **P0**：10.0.0.9 mysql84 最终 dump 72KB（`发布/old/ems-simulate-docker/dumps/net_dump_final_20261121.sql`），计数 device=3 / point_mapping=8 / point_yc=78。
+- **P2**：迁移脚本在 10.0.0.9 ems-simulate 容器内实跑，24 表逐表对账全 OK、外键检查 OK（connection_session 为运行态数据，表结构保留、行清空）。踩坑两处：MySQL 方言类型（TINYINT 等）需转通用类型再 create_all；SA 2.0 无 `Table.count()`。
+- **P3**：主站-仿真对端地址发现库里是 `127.0.0.1:2406`（与运行态不符——**API 改 channel ip/port 疑似不落库**，`channels/update` 坑的变体），set-site 直接 SQL 改为 `10.0.0.194:2404`。本机 10.0.0.7 网卡走公用配置档且防火墙公用=关，502/2404 入站免配置。
+- **P4 验收（§7 对照）**：
+  1. ✓ 三条 TCP 全通（DUT→本机 502/2404、本机→DUT 2404），`YX_DATA` 101/102/107=65、108=0（同 10.0.0.9 基线）；
+  2. ✓ yc512=200.0、yc513=-555.0、yc222=77.7 精确落库（补丁④小数保真）；
+  3. ✓ CA=257 服务端正常（由 102=65 与浮点数据隐含证明）；
+  4. ✓ 闭环六环：主站 YS5=100 → DUT AGC 计算（yc101=99.864，与 2026-11-14 联调记录同值复现）→ 06 写 YS1/4/6/7=123/300/700/400 → 8 条映射回灌 → DUT 回读 yc301/303/305/307 与 yc501/601/901/1001 全对 → 转发上行（主站总召收到 YC101=100.0）。功率反馈 4 条跨设备映射在 SQLite 上工作正常。
+- **专项疑点已答**：设备级 stop→start 假活在**原生 Windows 同样复现**（`channels/restart` 后 API 报成功、iec104.log 只有"已停止"无"已启动"、DUT 侧 CLOSE-WAIT 不重连）——恢复链必须整进程重启，与 Docker 版结论一致。
+- **恢复链定版（原生版）**：taskkill exe → 重启 → start×3 → **立刻写点值（抢在 DUT 重连总召之前，窗口约 30s）** → autoread + gi。竞态教训：DUT 只认总召响应、运行值不自发上送，且不主动周期总召——写值晚于 DUT 重连总召则值停在 0，必须按上述顺序。全流程实测 13 秒完成，DUT 自动重连恢复。
+- 待办：24h 稳定性观察（§7 第 6 条）与 P5 正式割接交付。
