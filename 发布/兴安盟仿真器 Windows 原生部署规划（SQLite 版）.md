@@ -1,6 +1,6 @@
 # 兴安盟仿真器 Windows 原生部署规划（SQLite 版）
 
-> 状态：规划稿，尚未实施。本文只描述方案、步骤与验收，不涉及对仓库的任何改动。 范围：把 ems\_simulate 仿真器部署到同公司同事的 Windows 机器上，不使用 Docker Desktop，数据库由 MySQL 改为 SQLite，并以 SQLite 版作为今后的主线。
+> 状态：规划稿。P1 的方案 B 构建验证已于 2026-11-21 实施（见第 13 节），其余阶段尚未实施。本文只描述方案、步骤与验收。 范围：把 ems\_simulate 仿真器部署到同公司同事的 Windows 机器上，不使用 Docker Desktop，数据库由 MySQL 改为 SQLite，并以 SQLite 版作为今后的主线。
 
 ## 1. 目标与前提
 
@@ -14,22 +14,24 @@
 | 项目 | 结论 |
 | --- | --- |
 | SQLite 支持 | 上游默认就是 SQLite：`config.ini` 里 `type = sqlite`，`db_config.py` 已有 SQLite 配置（WAL、`busy_timeout=5000`），建表靠 `create_all`，数据库层无需改代码。 |
-| 入口是否便携 | `start_back_end.py` 支持 `--port` 与 `EMS_ROOT_DIR`，首次启动自动准备 `data/log/config` 目录并复制初始 `ems.db`。 |
-| 原生依赖难点（2026-11-21 核验，大幅降险） | Windows 原生依赖。`wheels/` 里的 c104 是 `linux_x86_64` 的 cp312 wheel（仅供 Docker 镜像重建用）。但已核实 **PyPI c104 2.2.1 提供全套 win_amd64 wheel（cp310–cp313）**；600888 fork 的 pin 提交（214b88d）内容仅为 "Vendor third-party dependencies"，是打包改动而非协议功能差异；上游 `pyproject.toml` 注释亦明示非 fork 版本可直接满足 pip。首选直接用 PyPI wheel，无需 MSVC 编译。 |
+| 入口是否便携 | `start_back_end.py` 支持 `--port` 与 `EMS_ROOT_DIR`，首次启动自动准备 `data/log/config` 目录；若包内有初始 `data/ems.db` 则自动复制。注意：仓库源码树里**没有** `data/ems.db`（只有 `ems_schema.sql`），冷启动实际靠 `create_all` 建空库；交付包放迁移后的 `ems.db` 即走复制路径。 |
+| 原生依赖难点（2026-11-21 二次核验修正） | Windows 原生依赖。`wheels/` 里的 c104 是 `linux_x86_64` cp312（仅供 Docker 镜像重建）。PyPI c104 2.2.1 有全套 win_amd64 wheel（cp310–cp313），可直接装、能跑；**但 fork 2.2.2 在 2.2.1 之后有功能提交**（c7ea398 稳定连接 ID/本地端点/TLS 握手事件，及 fe436e6/f9ded6f/8ec90de 的 TLS/hostname verification 修复；pin 214b88d 只是压在最上面的 vendoring，不能代表 fork 全部差异）。ems 代码用 `c104.ServerConnection` 做连接监控（iec104server.py:18-24 有 getattr 降级——2.2.1 能跑但**丢连接监控**）；`c104.TransportSecurity` 直接使用（tls.py:196，无降级）。`pyproject.toml` 注释本意是"本地编译的 2.2.2 可满足 pip"，不等于 PyPI 2.2.1 等效。另 `build_windows.ps1:152-155` 有硬门槛（`c104=="2.2.2"` 且 `TransportSecurity` 有 `set_hostname_verification`，该 API 在全部 Python 代码中零引用、只在这道门槛里）——**PyPI 2.2.1 过不了此脚本**，须绕开（见 P1）。 |
 | 构建环境 | 本规划所需的 Windows 构建与验证都要在 Leo 的 Windows 本机（`C:\work\Hinggan_League`）上完成。 |
-| 已知缺口（2026-11-21 核验，不成立） | 初稿称 `ems_simulate_backend.spec` 在仓库根目录未找到——实际它就在源码根目录 `发布/old/ems_simulate-src/`（153 行，支持 onefile/onedir 环境变量切换），`build_windows.ps1:180` 直接引用；初稿查错了目录（查成 `C:\work\Hinggan_League` 仓库根）。方案 B 可行性由此确认。 |
+| spec 可用性（2026-11-21 已闭环） | 初稿"spec 未找到"的判断来自 **GitHub 克隆**——当时根 `.gitignore` 模板规则 `*.spec` 把两份 `ems_simulate_backend.spec` 挡在库外，远端确实看不到，不是查错目录。已修（PR #1，已合并）：gitignore 加 `!` 例外，两份 spec 与 Docker 重建 wheels 入库。spec 本体 153 行，onefile/onedir 环境变量切换；c104 仅作为 hiddenimport 收集，**spec 自身不检查 c104 版本与 TLS API**。2026-11-21 已在 Windows 实际构建+冒烟通过，见第 13 节。 |
 
 ## 3. 打包形态选择
 
 | 方案 | 做法 | 优点 | 缺点 |
 | --- | --- | --- | --- |
 | A（推荐）嵌入式 Python + 离线 wheelhouse | 带上 Windows embeddable Python，依赖在构建机预装进目录，整包拷贝，`.py` 源码原样保留 | 4 处本地补丁都是源码改动，现场可见、可原地热修；没有 PyInstaller 的 hidden-import 问题 | 包体偏大（约 200MB 量级） |
-| B 上游 PyInstaller onedir | 使用 `scripts/build_windows.ps1` | 单目录、现成脚本；spec 文件已核实存在 | 补丁要重新打包才生效 |
+| B 上游 PyInstaller onedir | `scripts/build_windows.ps1`，或绕开脚本直接调 PyInstaller（见 P1 第 4 条） | 单目录、现成 spec；**2026-11-21 已在 Windows 构建+冒烟通过**（第 13 节） | 脚本内含 c104==2.2.2 硬门槛，用 PyPI 2.2.1 须绕开；补丁要重新打包才生效 |
 | C 目标机现场 `uv sync` | 目标机联网自行安装 | 包最小 | 需要 MSVC 编译 c104，对他人机器不现实 |
 
 选择 A 为主，B 为备选。理由是本项目有过补丁在镜像搬运中丢失的教训，源码可见、可原地改的方案在现场更稳。
 
 ## 4. 分阶段实施清单
+
+**P0 前置（最优先，两项待确认不解决则全流程阻塞）**：原第 11 节两项——① 同事机器的 Windows 版本与 IP、是否位于 10.0.0.0/24、能否直接访问 10.0.0.194:2404（不在同网段则割接不可行，需先处理路由或 VM 网络模式）；② 同事机器是否有管理员权限（影响防火墙脚本与服务注册方式）。
 
 ### P0 冻结与基线（约 1 小时）
 
@@ -38,11 +40,11 @@
 
 ### P1 Windows 构建与验证（在 Leo 的 Windows 本机）
 
-1. 确定 Python 版本（上游 CI 用 3.11，现网镜像是 3.12），并与 c104 的构建版本保持一致。
-2. 解决 Windows 版 c104：**首选 `pip install c104==2.2.1`**（PyPI 有 cp310–cp313 win_amd64 wheel；需同步把 `pyproject.toml`/requirements 的 `==2.2.2` pin 改为 2.2.1，并按 CLAUDE.md 要求重新生成 `requirements-docker.txt` 冻结清单），装完与第 4 条一起做功能冒烟。MSVC + CMake 自编译 fork 2.2.2 仅作兜底——上游 CI 的短路径缓存坑只在源码构建时出现，走 PyPI wheel 则无关。
-3. 确认 `pyiec61850-ng`、`cryptography`、`greenlet`、`psutil` 等原生依赖都有 Windows wheel。
-4. 验证 c104 满足 `set_hostname_verification` 等 API 检查，并确认补丁 ①②③④ 对应的源码都在构建树内。
-5. 构建嵌入式 Python 便携包（方案 A）；方案 B 的 spec 文件已核实存在，可直接试跑作为对照。
+1. Python 版本定 **3.12**（与现网镜像一致；PyPI c104 / pyiec61850-ng 均有 cp312 win_amd64 wheel）。构建环境已就绪：`ems_simulate/.venv-win` 即 py3.12.15 + PyPI c104 2.2.1 + 全部运行依赖，2026-11-21 又补装了 pyinstaller 6.18.0 / altgraph / Pillow。
+2. c104 选型（2026-11-21 核验后的定版）：**PyPI 2.2.1 可直接装、能跑**（有 getattr 降级），代价是丢连接监控（`ServerConnection`）与 TLS 新 API；**fork 2.2.2 功能完整但需 MSVC 自编译**（上游 CI 的短路径缓存坑只在此场景出现）。方案 A 便携包先用 2.2.1 起步、P4 对 DUT 验收后定夺是否换自编译 2.2.2；若定 2.2.1，需同步改 `pyproject.toml`/requirements 的 `==2.2.2` pin 并按 CLAUDE.md 重新生成 `requirements-docker.txt` 冻结清单。
+3. 确认 `pyiec61850-ng`、`cryptography`、`greenlet`、`psutil` 等原生依赖都有 Windows wheel（已核：pyiec61850-ng 1.6.1.10 有 cp310–cp314 win_amd64，其余在 `.venv-win` 实装可用）。
+4. ~~验证 c104 满足 `set_hostname_verification` 等 API 检查~~（2026-11-21 修正：该 API 只存在于 `build_windows.ps1:152-155` 的硬门槛里，Python 代码零引用，PyPI 2.2.1 没有此 API）。**用 2.2.1 时不得按原脚本走**：直接用环境变量调 PyInstaller 绕开脚本（已验证可行，见第 13 节），或删掉脚本里那处断言。补丁 ①②③④ 源码已在构建树内核实（5 个文件"本地补丁"注释齐全）。
+5. 构建嵌入式 Python 便携包（方案 A）；方案 B 已完成首次构建+冒烟（第 13 节），此后仅需随补丁变更重打包对照。
 
 ### P2 MySQL → SQLite 一次性迁移（约 1 天）
 
@@ -126,17 +128,16 @@
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
-| PyPI c104 2.2.1 与 fork 2.2.2 存在未察觉的功能差异 | P1 冒烟不通过 | 已核实 PyPI 有 win_amd64 wheel 且 fork pin 提交仅 vendoring；按第 7 节验收冒烟（CA=257、M_ME_NC 浮点、补丁④）；失败则回退 MSVC 自编译 fork 2.2.2（注意短路径缓存） |
+| PyPI c104 2.2.1 与 fork 2.2.2 的功能差异（连接监控 `ServerConnection`、TLS API）影响超出预期 | P4 对 DUT 验收不达标 | 差异已定位（fork 2.2.1 后有功能提交，非"仅 vendoring"）；2.2.1 有 getattr 降级能跑、构建实证已过（第 13 节）；P4 按第 7 节验收判分，不达标则 MSVC 自编译 fork 2.2.2（注意短路径缓存） |
 | 设备重启假活在原生下仍复现 | 恢复链更重 | 恢复链做成整进程重启并脚本化 |
 | SQLite 写锁 | 偶发超时 | 已开 WAL；做压力测试；必要时调大 `busy_timeout` |
 | 大小写敏感导致按名查找失败 | 设备或映射找不到 | 迁移后逐项抽检；必要时加 `COLLATE NOCASE` |
 | 目标机无管理员权限或杀软拦截 | 无法放行端口、无法运行 | 提前确认；准备免安装说明 |
 | 实时库写链路静默冻死 | 改值后不落库 | 沿用既有经验：改值后超过 60 秒不落库即怀疑，必要时重启 DUT |
 
-## 11. 待确认信息
+## 11. 待确认信息（已前置到 P0 之前解决，见第 4 节开头）
 
-- 同事机器的 Windows 版本与 IP；是否位于 10.0.0.0/24，能否直接访问 10.0.0.194:2404。这决定 `set-site` 的默认值，也决定割接时是否需要处理路由或 VM 网络模式。
-- 同事机器是否有管理员权限（影响防火墙脚本与服务注册方式）。
+两项：目标机 Windows 版本 / IP / 是否在 10.0.0.0/24 及对 10.0.0.194:2404 的可达性；目标机管理员权限。
 
 ## 12. 交付物
 
@@ -145,3 +146,23 @@
 3. `set-site` 脚本与 DUT 侧 `PORT_NET` 修改说明
 4. 完整源码与 GPL 许可文本
 5. 割接与回滚手册（本文第 8 节）
+
+## 13. 方案 B 构建实证（2026-11-21，Leo 本机）
+
+spec 首次在 Windows 上真实构建并冒烟通过，"spec 是否可用"疑点关闭。
+
+- 环境：`ems_simulate/.venv-win`（Python 3.12.15 + PyPI c104 2.2.1 + 全部运行依赖；当日补装 pyinstaller 6.18.0 / altgraph / Pillow）。对照 `requirements-docker.txt` 冻结清单仅缺 uvloop——Linux 专属，Windows 上 uvicorn 自动走 asyncio，无碍。
+- 构建命令（绕开 `build_windows.ps1` 的 c104==2.2.2 硬门槛，直接调 PyInstaller）：
+
+  ```
+  cd ems_simulate
+  EMS_PYINSTALLER_MODE=onedir EMS_PYINSTALLER_CONSOLE=1 .venv-win/Scripts/pyinstaller.exe ems_simulate_backend.spec --noconfirm --distpath dist --workpath build
+  ```
+
+  约 3.6 分钟，产物 `dist/ems_simulate_backend/`（onedir，109MB）。
+- 冒烟：`ems_simulate_backend.exe --port 8992` 启动正常，`/api/health` 返回 200 且 `database: sqlite`（自动建空库）；`_internal/` 内确认 c104、pyiec61850 原生模块均已打入。
+- 过程发现（3 条）：
+  1. onedir 模式按设计**不打包 config.ini**（spec 的 `BUNDLE_CONFIG` 默认 off），需在 exe 旁放可编辑配置（复制后正常读取，已验证）；
+  2. health 报 `version 0.0.0`——冻结环境丢包元数据，纯外观问题；
+  3. `/docs` 与裸 `/api/devices` 前缀 404 属正常（子路径路由 + 未开 docs），非缺陷。
+- 产物在 `ems_simulate/dist`（gitignored，未入库，不需要可直接删）。
