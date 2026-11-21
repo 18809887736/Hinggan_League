@@ -15,16 +15,16 @@
 | --- | --- |
 | SQLite 支持 | 上游默认就是 SQLite：`config.ini` 里 `type = sqlite`，`db_config.py` 已有 SQLite 配置（WAL、`busy_timeout=5000`），建表靠 `create_all`，数据库层无需改代码。 |
 | 入口是否便携 | `start_back_end.py` 支持 `--port` 与 `EMS_ROOT_DIR`，首次启动自动准备 `data/log/config` 目录并复制初始 `ems.db`。 |
-| 真正的难点 | Windows 原生依赖。目前 `wheels/` 里的 c104 是 `linux_x86_64` 的 cp312 wheel，Windows 上不能用，需要 Windows 版 c104 2.2.2（600888 fork 的指定 commit）。 |
+| 原生依赖难点（2026-11-21 核验，大幅降险） | Windows 原生依赖。`wheels/` 里的 c104 是 `linux_x86_64` 的 cp312 wheel（仅供 Docker 镜像重建用）。但已核实 **PyPI c104 2.2.1 提供全套 win_amd64 wheel（cp310–cp313）**；600888 fork 的 pin 提交（214b88d）内容仅为 "Vendor third-party dependencies"，是打包改动而非协议功能差异；上游 `pyproject.toml` 注释亦明示非 fork 版本可直接满足 pip。首选直接用 PyPI wheel，无需 MSVC 编译。 |
 | 构建环境 | 本规划所需的 Windows 构建与验证都要在 Leo 的 Windows 本机（`C:\work\Hinggan_League`）上完成。 |
-| 已知缺口 | `build_windows.ps1` 引用的 `ems_simulate_backend.spec` 在仓库根目录未找到，影响 PyInstaller 方案是否可行。 |
+| 已知缺口（2026-11-21 核验，不成立） | 初稿称 `ems_simulate_backend.spec` 在仓库根目录未找到——实际它就在源码根目录 `发布/old/ems_simulate-src/`（153 行，支持 onefile/onedir 环境变量切换），`build_windows.ps1:180` 直接引用；初稿查错了目录（查成 `C:\work\Hinggan_League` 仓库根）。方案 B 可行性由此确认。 |
 
 ## 3. 打包形态选择
 
 | 方案 | 做法 | 优点 | 缺点 |
 | --- | --- | --- | --- |
 | A（推荐）嵌入式 Python + 离线 wheelhouse | 带上 Windows embeddable Python，依赖在构建机预装进目录，整包拷贝，`.py` 源码原样保留 | 4 处本地补丁都是源码改动，现场可见、可原地热修；没有 PyInstaller 的 hidden-import 问题 | 包体偏大（约 200MB 量级） |
-| B 上游 PyInstaller onedir | 使用 `scripts/build_windows.ps1` | 单目录、现成脚本 | 缺 spec 文件需先确认；补丁要重新打包才生效 |
+| B 上游 PyInstaller onedir | 使用 `scripts/build_windows.ps1` | 单目录、现成脚本；spec 文件已核实存在 | 补丁要重新打包才生效 |
 | C 目标机现场 `uv sync` | 目标机联网自行安装 | 包最小 | 需要 MSVC 编译 c104，对他人机器不现实 |
 
 选择 A 为主，B 为备选。理由是本项目有过补丁在镜像搬运中丢失的教训，源码可见、可原地改的方案在现场更稳。
@@ -39,10 +39,10 @@
 ### P1 Windows 构建与验证（在 Leo 的 Windows 本机）
 
 1. 确定 Python 版本（上游 CI 用 3.11，现网镜像是 3.12），并与 c104 的构建版本保持一致。
-2. 解决 Windows 版 c104 2.2.2：自行用 MSVC + CMake 编译，或取上游 Windows 构建产物。上游 CI 提到 Windows 下对象路径过深，需要使用短路径缓存。
+2. 解决 Windows 版 c104：**首选 `pip install c104==2.2.1`**（PyPI 有 cp310–cp313 win_amd64 wheel；需同步把 `pyproject.toml`/requirements 的 `==2.2.2` pin 改为 2.2.1，并按 CLAUDE.md 要求重新生成 `requirements-docker.txt` 冻结清单），装完与第 4 条一起做功能冒烟。MSVC + CMake 自编译 fork 2.2.2 仅作兜底——上游 CI 的短路径缓存坑只在源码构建时出现，走 PyPI wheel 则无关。
 3. 确认 `pyiec61850-ng`、`cryptography`、`greenlet`、`psutil` 等原生依赖都有 Windows wheel。
 4. 验证 c104 满足 `set_hostname_verification` 等 API 检查，并确认补丁 ①②③④ 对应的源码都在构建树内。
-5. 构建嵌入式 Python 便携包（方案 A）；同时评估方案 B 是否可行。
+5. 构建嵌入式 Python 便携包（方案 A）；方案 B 的 spec 文件已核实存在，可直接试跑作为对照。
 
 ### P2 MySQL → SQLite 一次性迁移（约 1 天）
 
@@ -126,7 +126,7 @@
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
-| Windows 版 c104 构建不顺 | 阻塞全部 | 阶段 P1 最先验证；备选取上游 Windows 构建产物 |
+| PyPI c104 2.2.1 与 fork 2.2.2 存在未察觉的功能差异 | P1 冒烟不通过 | 已核实 PyPI 有 win_amd64 wheel 且 fork pin 提交仅 vendoring；按第 7 节验收冒烟（CA=257、M_ME_NC 浮点、补丁④）；失败则回退 MSVC 自编译 fork 2.2.2（注意短路径缓存） |
 | 设备重启假活在原生下仍复现 | 恢复链更重 | 恢复链做成整进程重启并脚本化 |
 | SQLite 写锁 | 偶发超时 | 已开 WAL；做压力测试；必要时调大 `busy_timeout` |
 | 大小写敏感导致按名查找失败 | 设备或映射找不到 | 迁移后逐项抽检；必要时加 `COLLATE NOCASE` |
