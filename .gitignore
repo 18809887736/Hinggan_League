@@ -189,6 +189,11 @@ ems-simulate-docker/*.tar.gz
 发布/*.tar
 发布/**/*.tar
 
+# 对外统一交付物：组装产物不入库（zip 超 100MB 走拷贝分发）；文档/脚本/基线dump/工具入库
+发布/对外统一交付物/ems-sim-win-*/
+发布/对外统一交付物/*.zip
+发布/对外统一交付物/assets_base.db
+
 # 模板规则误伤的应入库文件（放行）：
 # PyInstaller 构建入口 spec——方案 B 依赖，曾被 *.spec 挡在库外，GitHub 克隆看不到导致误判"未找到"
 !发布/old/ems_simulate-src/ems_simulate_backend.spec
