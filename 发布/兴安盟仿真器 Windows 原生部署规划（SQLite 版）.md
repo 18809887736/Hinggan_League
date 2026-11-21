@@ -23,11 +23,11 @@
 
 | 方案 | 做法 | 优点 | 缺点 |
 | --- | --- | --- | --- |
-| A（推荐）嵌入式 Python + 离线 wheelhouse | 带上 Windows embeddable Python，依赖在构建机预装进目录，整包拷贝，`.py` 源码原样保留 | 4 处本地补丁都是源码改动，现场可见、可原地热修；没有 PyInstaller 的 hidden-import 问题 | 包体偏大（约 200MB 量级） |
-| B 上游 PyInstaller onedir | `scripts/build_windows.ps1`，或绕开脚本直接调 PyInstaller（见 P1 第 4 条） | 单目录、现成 spec；**2026-11-21 已在 Windows 构建+冒烟通过**（第 13 节） | 脚本内含 c104==2.2.2 硬门槛，用 PyPI 2.2.1 须绕开；补丁要重新打包才生效 |
+| A 嵌入式 Python + 离线 wheelhouse | 带上 Windows embeddable Python，依赖在构建机预装进目录，整包拷贝，`.py` 源码原样保留 | 4 处本地补丁现场可见、可原地热修；没有 PyInstaller 的 hidden-import 问题 | 打包工序最重（原 P1 主要工作量所在）；包体约 200MB 量级 |
+| B（推荐）上游 PyInstaller onedir | `scripts/build_windows.ps1`，或绕开脚本直接调 PyInstaller（见 P1 第 4 条） | 单目录；**目标机零安装环境**——解压即用、无需 Python/依赖，自动建 SQLite（已实证）；2026-11-21 构建+冒烟通过（第 13 节）；产物 109MB | 脚本内含 c104==2.2.2 硬门槛，用 PyPI 2.2.1 须绕开；补丁冻结在 exe 内，改动需构建机重打包（约 4 分钟）再拷贝覆盖 |
 | C 目标机现场 `uv sync` | 目标机联网自行安装 | 包最小 | 需要 MSVC 编译 c104，对他人机器不现实 |
 
-选择 A 为主，B 为备选。理由是本项目有过补丁在镜像搬运中丢失的教训，源码可见、可原地改的方案在现场更稳。
+选择 B 为主（2026-11-21 定）：目标机零安装环境是硬需求且已实证；现场热修用"构建机重打包 + 拷贝覆盖"满足，全套源码仍随包交付（GPL 本身要求），源码可见性不丢，丢的只是"原地改立即生效"。A 降为备选，仅在 PyInstaller 出现无法绕过的打包问题时启用。
 
 ## 4. 分阶段实施清单
 
@@ -41,10 +41,10 @@
 ### P1 Windows 构建与验证（在 Leo 的 Windows 本机）
 
 1. Python 版本定 **3.12**（与现网镜像一致；PyPI c104 / pyiec61850-ng 均有 cp312 win_amd64 wheel）。构建环境已就绪：`ems_simulate/.venv-win` 即 py3.12.15 + PyPI c104 2.2.1 + 全部运行依赖，2026-11-21 又补装了 pyinstaller 6.18.0 / altgraph / Pillow。
-2. c104 选型（2026-11-21 核验后的定版）：**PyPI 2.2.1 可直接装、能跑**（有 getattr 降级），代价是丢连接监控（`ServerConnection`）与 TLS 新 API；**fork 2.2.2 功能完整但需 MSVC 自编译**（上游 CI 的短路径缓存坑只在此场景出现）。方案 A 便携包先用 2.2.1 起步、P4 对 DUT 验收后定夺是否换自编译 2.2.2；若定 2.2.1，需同步改 `pyproject.toml`/requirements 的 `==2.2.2` pin 并按 CLAUDE.md 重新生成 `requirements-docker.txt` 冻结清单。
+2. c104 选型（2026-11-21 核验后的定版）：**PyPI 2.2.1 可直接装、能跑**（有 getattr 降级），代价是丢连接监控（`ServerConnection`）与 TLS 新 API；**fork 2.2.2 功能完整但需 MSVC 自编译**（上游 CI 的短路径缓存坑只在此场景出现）。交付包（方案 B）先用 2.2.1 起步、P4 对 DUT 验收后定夺是否换自编译 2.2.2；若定 2.2.1，需同步改 `pyproject.toml`/requirements 的 `==2.2.2` pin 并按 CLAUDE.md 重新生成 `requirements-docker.txt` 冻结清单。
 3. 确认 `pyiec61850-ng`、`cryptography`、`greenlet`、`psutil` 等原生依赖都有 Windows wheel（已核：pyiec61850-ng 1.6.1.10 有 cp310–cp314 win_amd64，其余在 `.venv-win` 实装可用）。
 4. ~~验证 c104 满足 `set_hostname_verification` 等 API 检查~~（2026-11-21 修正：该 API 只存在于 `build_windows.ps1:152-155` 的硬门槛里，Python 代码零引用，PyPI 2.2.1 没有此 API）。**用 2.2.1 时不得按原脚本走**：直接用环境变量调 PyInstaller 绕开脚本（已验证可行，见第 13 节），或删掉脚本里那处断言。补丁 ①②③④ 源码已在构建树内核实（5 个文件"本地补丁"注释齐全）。
-5. 构建嵌入式 Python 便携包（方案 A）；方案 B 已完成首次构建+冒烟（第 13 节），此后仅需随补丁变更重打包对照。
+5. ~~构建嵌入式 Python 便携包（方案 A）~~——方案 B 已升为主交付（§3，2026-11-21 定），本条简化为：把第 13 节的构建流程固化成一键重打包脚本，并做一次完整交付态打包（exe + 旁置 config.ini + 装载迁移后 `ems.db`）作为交付基线；方案 A 仅在 PyInstaller 出现无法绕过的打包问题时启用。
 
 ### P2 MySQL → SQLite 一次性迁移（约 1 天）
 
@@ -85,15 +85,15 @@
 
 ## 6. 目录结构建议
 
-- `python/`：嵌入式 Python 及依赖
-- `app/`：源码（含 4 处补丁）与 `www/` 前端产物
-- `data/ems.db`
-- `config.ini`：`type=sqlite`；监听地址按是否需要远程访问 Web 选择 `0.0.0.0` 或 `127.0.0.1`
+- `ems_simulate_backend.exe` + `_internal/`：onedir 产物放包根（`www/` 前端与 point_csv 已打进 `_internal`；以下 config/data/log 均生成在 exe 同级，实测如此）
+- `data/ems.db`：迁移后的库（exe 旁，启动自动使用）
+- `config.ini`：`type=sqlite`；放 exe 旁（onedir 按设计不打包 config，旁置的可编辑配置优先，已实证）；监听地址按是否需要远程访问 Web 选择 `0.0.0.0` 或 `127.0.0.1`
+- `src/`：全套源码（含 4 处补丁）与 GPL 许可文本——合规交付与备查用，现场不从源码跑
 - `log/`
 - `tools/`：`xamapi-local.py` 等辅助脚本
 - `scripts/`：启动、停止、重启恢复、防火墙、站点参数设置
 
-包内不再含 MySQL 配置与明文密码，前端使用现成的 `www/` 构建产物，目标机无需 Node。
+包内不含 Python 运行时与任何安装环境（已冻结进 exe），不含 MySQL 配置与明文密码；目标机无需 Python / Node，解压即用。
 
 ## 7. 验收标准（以 DUT 表现为准）
 
