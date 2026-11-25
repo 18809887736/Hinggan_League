@@ -179,17 +179,19 @@ if __name__ == "__main__":
     )
 
     # 本地补丁⑦：首页注入版本号徽标（右下角小字，免前端重编译；须在 StaticFiles 挂载前注册）
+    # 本地补丁⑧：同一路由顺带注入 CSS 隐藏上游页脚版权栏（Copyright © 2026 CDY，App.vue .app-footer）
     @app.get("/", include_in_schema=False)
     async def _index_with_version() -> HTMLResponse:
         html = (static_dir / "index.html").read_text(encoding="utf-8")
-        badge = (
+        inject = (
+            "<style>.app-footer{display:none!important}</style>"
             '<div style="position:fixed;right:14px;bottom:12px;z-index:9999;'
             "font-size:12px;color:#8a94a6;opacity:.85;user-select:none;"
             'font-family:Consolas,monospace;pointer-events:none;">'
             f"v{backend_version}</div>"
         )
         if "</body>" in html:
-            html = html.replace("</body>", badge + "</body>", 1)
+            html = html.replace("</body>", inject + "</body>", 1)
         return HTMLResponse(html)
 
     app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
