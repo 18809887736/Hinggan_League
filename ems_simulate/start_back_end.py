@@ -15,6 +15,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
+import time
 
 
 def _parse_args() -> argparse.Namespace:
@@ -91,6 +92,34 @@ def _activate_runtime_config(root_dir: Path):
     return Config
 
 
+def _open_browser_when_ready(host: str, port: int, timeout_s: float = 60.0) -> None:
+    """本地补丁⑤：等服务真正可访问后用默认浏览器打开 Web 页面（open_browser=true 时）。"""
+    import threading
+    import urllib.request
+    import webbrowser
+
+    browser_host = host if host not in ("", "0.0.0.0", "::") else "127.0.0.1"
+    url = f"http://{browser_host}:{port}/"
+
+    def _wait_and_open() -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(f"{url}api/health", timeout=2):
+                    pass
+                break
+            except OSError:
+                time.sleep(0.5)
+        else:
+            print(f"[open_browser] {timeout_s}s 内服务未就绪，放弃打开浏览器")
+            return
+        time.sleep(0.5)  # 让静态资源挂载与首轮路由初始化完成
+        if not webbrowser.open(url):
+            print(f"[open_browser] 无法调起默认浏览器，请手动访问 {url}")
+
+    threading.Thread(target=_wait_and_open, name="open-browser", daemon=True).start()
+
+
 if __name__ == "__main__":
     args = _parse_args()
     root_dir = _get_root_dir(args.root_dir).expanduser().resolve(strict=False)
@@ -111,10 +140,14 @@ if __name__ == "__main__":
     )
     app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
+    effective_port = args.port if args.port is not None else Config.web_port
+    if Config.open_browser:
+        _open_browser_when_ready(Config.web_host, effective_port)
+
     uvicorn.run(
         "src.web.app:app",
         host=Config.web_host,
-        port=args.port if args.port is not None else Config.web_port,
+        port=effective_port,
         log_level="info",
         reload=False,
         # Uvicorn 0.40 creates its own loop, bypassing event-loop policies.

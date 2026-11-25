@@ -6,6 +6,7 @@
 from configparser import ConfigParser
 import os
 from pathlib import Path
+import sys
 
 from src.enums.data_source import DataSource
 
@@ -47,6 +48,8 @@ class Config:
     # Web服务配置
     web_host: str = "127.0.0.1"  # 服务监听地址，默认仅本机访问
     web_port: int = 8991
+    # 本地补丁⑤：启动完成后自动用默认浏览器打开 Web 页面（Windows 默认开，可用 open_browser=false 关）
+    open_browser: bool = sys.platform == "win32"
 
     @classmethod
     def load_config(cls, config_file: str) -> None:
@@ -82,6 +85,9 @@ class Config:
                 if "server" in config:
                     cls.web_host = config["server"].get("host", cls.web_host)
                     cls.web_port = int(config["server"].get("port", cls.web_port))
+                    cls.open_browser = config["server"].getboolean(
+                        "open_browser", cls.open_browser
+                    )
             else:
                 print(f"Warning: Config file {config_file} not found, using defaults")
         except Exception as e:
