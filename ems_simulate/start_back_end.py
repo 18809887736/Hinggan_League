@@ -184,7 +184,8 @@ if __name__ == "__main__":
     async def _index_with_version() -> HTMLResponse:
         html = (static_dir / "index.html").read_text(encoding="utf-8")
         inject = (
-            "<style>.app-footer{display:none!important}</style>"
+            "<style>.app-footer{display:none!important}"
+            ".contact-section{display:none!important}</style>"
             '<div style="position:fixed;right:14px;bottom:12px;z-index:9999;'
             "font-size:12px;color:#8a94a6;opacity:.85;user-select:none;"
             'font-family:Consolas,monospace;pointer-events:none;">'
