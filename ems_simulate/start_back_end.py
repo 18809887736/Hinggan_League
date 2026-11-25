@@ -164,9 +164,11 @@ if __name__ == "__main__":
     Config = _activate_runtime_config(root_dir)
 
     # Late imports keep CLI parsing and runtime root setup deterministic.
+    from fastapi.responses import HTMLResponse
     from fastapi.staticfiles import StaticFiles
     import uvicorn
 
+    from src import __version__ as backend_version
     from src.web.app import app
 
     # 挂载静态文件（前端打包产物）
@@ -175,6 +177,21 @@ if __name__ == "__main__":
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
         else Path(__file__).resolve().parent / "www"
     )
+
+    # 本地补丁⑦：首页注入版本号徽标（右下角小字，免前端重编译；须在 StaticFiles 挂载前注册）
+    @app.get("/", include_in_schema=False)
+    async def _index_with_version() -> HTMLResponse:
+        html = (static_dir / "index.html").read_text(encoding="utf-8")
+        badge = (
+            '<div style="position:fixed;right:14px;bottom:12px;z-index:9999;'
+            "font-size:12px;color:#8a94a6;opacity:.85;user-select:none;"
+            'font-family:Consolas,monospace;pointer-events:none;">'
+            f"v{backend_version}</div>"
+        )
+        if "</body>" in html:
+            html = html.replace("</body>", badge + "</body>", 1)
+        return HTMLResponse(html)
+
     app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
     effective_port = args.port if args.port is not None else Config.web_port

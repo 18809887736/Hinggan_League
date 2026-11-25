@@ -20,3 +20,8 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller 构建失败 (exit $LASTEXITCODE)"
 Write-Host ""
 Write-Host "构建完成: $root\dist\ems_simulate_backend\"
 Write-Host "部署提醒: config.ini 与 data\ems.db 需放在 exe 同级目录（onedir 不打包二者）"
+
+# patch-7 companion: write dist version.txt (frozen exe reads it to show version)
+$ver = & $py -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+[IO.File]::WriteAllText((Join-Path $root "dist\ems_simulate_backend\version.txt"), $ver.Trim())
+Write-Host "version.txt 已写入: $ver"

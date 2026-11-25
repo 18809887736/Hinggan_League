@@ -44,7 +44,8 @@ host = 127.0.0.1
 port = 8991
 open_browser = true
 "@ | Set-Content (Join-Path $out 'config.ini') -Encoding UTF8
-Write-Host '[2/6] config.ini 已生成（type=sqlite，启动后自动开浏览器）'
+[IO.File]::WriteAllText((Join-Path $out 'version.txt'), $Version)
+Write-Host '[2/6] config.ini 已生成（type=sqlite，启动后自动开浏览器）；version.txt = ' $Version
 
 # 3) 基线库：由文本 dump 重建
 New-Item -ItemType Directory -Force (Join-Path $out 'data') | Out-Null
