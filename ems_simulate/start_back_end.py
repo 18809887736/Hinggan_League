@@ -120,9 +120,46 @@ def _open_browser_when_ready(host: str, port: int, timeout_s: float = 60.0) -> N
     threading.Thread(target=_wait_and_open, name="open-browser", daemon=True).start()
 
 
+def _acquire_single_instance_lock(root_dir: Path):
+    """本地补丁⑥：同一运行根只允许一个实例（Windows 命名互斥体 / Linux 抽象域套接字）。
+
+    锁按运行根区分：同一部署双击两次会被拦截；不同 EMS_ROOT_DIR（不同端口/库）
+    的并行调试实例不受影响。互斥体随进程退出自动释放，崩溃无残留锁。
+    """
+    import hashlib
+
+    digest = hashlib.sha256(str(root_dir).lower().encode("utf-8")).hexdigest()[:16]
+    if sys.platform == "win32":
+        import ctypes
+
+        ERROR_ALREADY_EXISTS = 183
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.CreateMutexW(None, False, f"Local\\EMS_Simulate_Backend_{digest}")
+        if not handle:
+            return None  # 创建失败时保守放行，不因锁功能阻断启动
+        if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            print(f"[single-instance] 运行根已有实例在运行：{root_dir}，本次启动退出")
+            sys.exit(0)
+        return handle
+    try:
+        import errno
+        import socket
+
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(f"\0ems_simulate_backend_{digest}")
+        return s
+    except OSError as e:
+        if getattr(e, "errno", None) == errno.EADDRINUSE:
+            print(f"[single-instance] 运行根已有实例在运行：{root_dir}，本次启动退出")
+            sys.exit(0)
+        return None  # 环境不支持抽象套接字时保守放行
+
+
 if __name__ == "__main__":
     args = _parse_args()
     root_dir = _get_root_dir(args.root_dir).expanduser().resolve(strict=False)
+    _single_instance_lock = _acquire_single_instance_lock(root_dir)
     _prepare_runtime_root(root_dir)
     Config = _activate_runtime_config(root_dir)
 
