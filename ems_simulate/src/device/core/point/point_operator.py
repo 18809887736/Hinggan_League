@@ -116,6 +116,11 @@ class PointOperator:
             "EX",
         }
 
+    def _reject_manual_write_if_locked(self, point: BasePoint, point_code: str, source: ChangeSource | None) -> None:
+        """本地补丁10：被映射锁定的测点由公式驱动，人工写值会破坏量间自洽且随后被覆盖——直接拒绝。"""
+        if getattr(point, "is_locked_by_mapping", False) and (source or ChangeSource.MANUAL) == ChangeSource.MANUAL:
+            raise ValueError(f"测点 {point_code} 由测点映射锁定，请修改驱动点或先停用对应映射")
+
     def edit_value(
         self,
         point_code: str,
@@ -136,6 +141,7 @@ class PointOperator:
         point = self._pm.get_point_by_code(point_code, slave_id)
         if not point:
             raise ValueError(f"未找到测点: {point_code}")
+        self._reject_manual_write_if_locked(point, point_code, source)
 
         if (
             isinstance(self._handler, ClientHandler)
@@ -189,6 +195,7 @@ class PointOperator:
         point = self._pm.get_point_by_code(point_code, slave_id)
         if not point:
             raise ValueError(f"未找到测点: {point_code}")
+        self._reject_manual_write_if_locked(point, point_code, source)
 
         if (
             isinstance(self._handler, ClientHandler)

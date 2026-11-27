@@ -246,6 +246,8 @@ class Device:
         # 添加测点
         all_points = self.point_manager.get_all_points()
         self.protocol_handler.add_points(all_points)
+        # 本地补丁9（r2）：窄带宽遥测初值（带宽中心）推到协议层，不按「开始」线上也是合理值
+        self.simulation_controller.push_band_initial_values()
 
     # 初始化方法
     def initModbusTcpServer(self, port: int, protocol_type: ProtocolType = ProtocolType.ModbusTcpServer) -> None:
@@ -1127,6 +1129,8 @@ class Device:
             self.protocol_handler.initialize(self._build_protocol_config())
             all_points = self.point_manager.get_all_points()
             self.protocol_handler.add_points(all_points)
+            # 本地补丁9（r2）：重建 handler 后协议层值丢失，重推窄带宽遥测当前值
+            self.simulation_controller.push_band_initial_values()
 
     # ===== 模拟控制（委托给 SimulationController） =====
 

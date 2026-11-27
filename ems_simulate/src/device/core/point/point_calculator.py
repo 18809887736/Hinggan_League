@@ -7,6 +7,7 @@ import ast
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 import operator
 import threading
 from typing import Any
@@ -51,6 +52,9 @@ class PointCalculator:
             ast.RShift: operator.rshift,
             ast.USub: operator.neg,
         }
+        # 本地补丁10：映射公式可用的数学函数白名单。电气量自洽需要 sqrt（S=√(P²+Q²)、Q=P·tanφ），
+        # 把机组有功限制在铭牌内需要 min/max。只接受白名单内、无关键字参数的具名函数调用。
+        self._functions: dict[str, Callable] = {"sqrt": math.sqrt, "abs": abs, "min": min, "max": max}
 
     def set_device_provider(self, provider: Any, mappings: list[dict[str, Any]] | None = None):
         """设置设备提供者"""
@@ -351,7 +355,8 @@ class PointCalculator:
                     except Exception as e:
                         log.error(f"Failed to update mapped point {target_point.code}: {e}")
 
-                log.info(f"Setting point {target_point.code} to {result}")
+                # 本地补丁10：派生映射在波动期间每秒触发数十次，这行日志降到 debug，避免主日志以约 40 MB/小时增长
+                log.debug(f"Setting point {target_point.code} to {result}")
             else:
                 log.error(f"Calculation result {result} is not a number")
 
@@ -388,5 +393,13 @@ class PointCalculator:
             op_func = self._operators.get(type(node.op))
             if op_func:
                 return op_func(operand)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and not node.keywords
+            and node.func.id in self._functions
+        ):
+            # 本地补丁10：白名单函数调用，实参仍按同一套受限规则求值
+            return self._functions[node.func.id](*(self._eval_expr(arg, context) for arg in node.args))
 
         raise ValueError(f"Unsupported operation: {type(node)}")
