@@ -8,15 +8,18 @@ BEGIN;
 --    两段母线电压 10.5±0.08、四台机组功率因数 0.8±0.008（带宽仍来自 band-20261127.sql）
 UPDATE point_yc SET min_limit=-2147480000, max_limit=2147480000
  WHERE channel_id=2 AND code NOT IN ('YC502', 'YC504', 'YC904', 'YC515', 'YC615', 'YC915', 'YC1015');
--- 2) 既有 8 条映射只改公式：机组有功 / 指令反馈 = 派发值限制在 [Pmin=0, Pmax=铭牌]（铭牌按一次图 D-01：6/15/15/6 MW）
-UPDATE point_mapping SET formula='min(max(YS1, 0), 6)' WHERE device_name='NCS-仿真' AND target_point_code='YC501';
+-- 2) 既有 8 条映射改公式（铭牌按一次图 D-01：6/15/15/6 MW）：
+--    指令反馈（PLC YC301~307）= 派发值限制在 [Pmin=0, Pmax=铭牌]，即命令本身；
+--    机组有功（NCS YC501/601/901/1001）= 限幅后的派发值 + 跟踪偏差，整体再夹在铭牌内。
+--    跟踪偏差 = 机组 cosφ 驱动点偏离 0.8 的量 × K，夹在 ±DEV 内：6 MW 机组 ±0.02 MW，15 MW 机组 ±0.045 MW。
 UPDATE point_mapping SET formula='min(max(YS1, 0), 6)' WHERE device_name='PLC-仿真' AND target_point_code='YC301';
-UPDATE point_mapping SET formula='min(max(YS4, 0), 15)' WHERE device_name='NCS-仿真' AND target_point_code='YC601';
 UPDATE point_mapping SET formula='min(max(YS4, 0), 15)' WHERE device_name='PLC-仿真' AND target_point_code='YC303';
-UPDATE point_mapping SET formula='min(max(YS6, 0), 15)' WHERE device_name='NCS-仿真' AND target_point_code='YC901';
 UPDATE point_mapping SET formula='min(max(YS6, 0), 15)' WHERE device_name='PLC-仿真' AND target_point_code='YC305';
-UPDATE point_mapping SET formula='min(max(YS7, 0), 6)' WHERE device_name='NCS-仿真' AND target_point_code='YC1001';
 UPDATE point_mapping SET formula='min(max(YS7, 0), 6)' WHERE device_name='PLC-仿真' AND target_point_code='YC307';
+UPDATE point_mapping SET source_point_codes='[{"device_name": "PLC-仿真", "point_code": "YS1", "alias": "YS1"}, {"device_name": "NCS-仿真", "point_code": "YC515", "alias": "PF"}]', formula='min(max(min(max(YS1, 0), 6) + min(max(2.5 * (PF - 0.8), -0.02), 0.02), 0), 6)' WHERE device_name='NCS-仿真' AND target_point_code='YC501';
+UPDATE point_mapping SET source_point_codes='[{"device_name": "PLC-仿真", "point_code": "YS4", "alias": "YS4"}, {"device_name": "NCS-仿真", "point_code": "YC615", "alias": "PF"}]', formula='min(max(min(max(YS4, 0), 15) + min(max(5.625 * (PF - 0.8), -0.045), 0.045), 0), 15)' WHERE device_name='NCS-仿真' AND target_point_code='YC601';
+UPDATE point_mapping SET source_point_codes='[{"device_name": "PLC-仿真", "point_code": "YS6", "alias": "YS6"}, {"device_name": "NCS-仿真", "point_code": "YC915", "alias": "PF"}]', formula='min(max(min(max(YS6, 0), 15) + min(max(5.625 * (PF - 0.8), -0.045), 0.045), 0), 15)' WHERE device_name='NCS-仿真' AND target_point_code='YC901';
+UPDATE point_mapping SET source_point_codes='[{"device_name": "PLC-仿真", "point_code": "YS7", "alias": "YS7"}, {"device_name": "NCS-仿真", "point_code": "YC1015", "alias": "PF"}]', formula='min(max(min(max(YS7, 0), 6) + min(max(2.5 * (PF - 0.8), -0.02), 0.02), 0), 6)' WHERE device_name='NCS-仿真' AND target_point_code='YC1001';
 -- 3) 新增 49 条派生映射。目标点被映射锁定：不再参与模拟，也不接受人工写值（补丁⑩）
 INSERT OR REPLACE INTO point_mapping(device_name, target_point_code, source_point_codes, formula, enable) VALUES ('NCS-仿真', 'YC505', '[{"device_name": "NCS-仿真", "point_code": "YC504", "alias": "Uab"}]', 'Uab', 1);
 INSERT OR REPLACE INTO point_mapping(device_name, target_point_code, source_point_codes, formula, enable) VALUES ('NCS-仿真', 'YC506', '[{"device_name": "NCS-仿真", "point_code": "YC504", "alias": "Uab"}]', 'Uab', 1);
@@ -73,8 +76,9 @@ COMMIT;
 --   SELECT count(*) FROM point_yc WHERE channel_id=2 AND min_limit<max_limit AND max_limit-min_limit<=1000;
 -- 回滚：
 --   DELETE FROM point_mapping WHERE target_point_code NOT IN ('YC301','YC303','YC305','YC307','YC501','YC601','YC901','YC1001');
---   UPDATE point_mapping SET formula='YS1' WHERE target_point_code IN ('YC301','YC501');
---   UPDATE point_mapping SET formula='YS4' WHERE target_point_code IN ('YC303','YC601');
---   UPDATE point_mapping SET formula='YS6' WHERE target_point_code IN ('YC305','YC901');
---   UPDATE point_mapping SET formula='YS7' WHERE target_point_code IN ('YC307','YC1001');
+--   UPDATE point_mapping SET source_point_codes='[{"device_name": "PLC-仿真", "point_code": "YS1", "alias": "YS1"}]', formula='YS1' WHERE target_point_code IN ('YC301', 'YC501');
+--   UPDATE point_mapping SET source_point_codes='[{"device_name": "PLC-仿真", "point_code": "YS4", "alias": "YS4"}]', formula='YS4' WHERE target_point_code IN ('YC303', 'YC601');
+--   UPDATE point_mapping SET source_point_codes='[{"device_name": "PLC-仿真", "point_code": "YS6", "alias": "YS6"}]', formula='YS6' WHERE target_point_code IN ('YC305', 'YC901');
+--   UPDATE point_mapping SET source_point_codes='[{"device_name": "PLC-仿真", "point_code": "YS7", "alias": "YS7"}]', formula='YS7' WHERE target_point_code IN ('YC307', 'YC1001');
 --   然后重跑 band-20261127.sql 恢复 54 点带宽；或直接用执行前的备份覆盖 ems.db。
+--   只想去掉跟踪偏差、保留其余：把 4 条机组有功映射的公式改回 min(max(YS, 0), 铭牌) 即可（源点留着不影响）。
