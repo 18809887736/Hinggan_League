@@ -5,13 +5,13 @@
 每台机组的 Q、I、三个线电压由 P、U、cosφ 按物理公式推出，母线量由所挂机组的量合成，
 机组有功/指令反馈 = 派发值限制在 [Pmin, Pmax]。需要补丁⑩（映射公式支持 sqrt/abs/min/max）。
 
-依据（2026-11-27 只读核对 DUT 库）：
-- GENERATOR：1#~4# 机组 maxPPower=6/15/6/15 MW、minPPower=0；每台机组 9 个测量点的点号
-  P/F/Q/Uab/Ubc/Uca/Ia/Ib/Ic = 501~509 / 601~609 / 901~909 / 1001~1009（cosφ 为 515/615/915/1015）。
+依据（2026-11-27 只读核对 DUT 库与一次图）：
+- 机组铭牌有功按一次图 D-01：1#=6、2#=15、3#=15、4#=6 MW（用户 2026-11-27 裁定以一次图为准，规划 D7）。
+  DUT 的 GENERATOR 表是 6/15/6/15，3#、4# 与一次图相反；下限 minPPower=0。
+- 每台机组 9 个测量点的点号 P/F/Q/Uab/Ubc/Uca/Ia/Ib/Ic = 501~509 / 601~609 / 901~909 / 1001~1009（cosφ 为 515/615/915/1015）。
 - 母线归属：BUSBAR_AGC_UP/DOWN_ADJUST_DEV 只把 1#、2# 列在 1# 母线下，据此取
   母线 1 ← 1#、2#，母线 2 ← 3#、4#（2026-11-27 已对照一次图 D-01 核实：Ⅰ 段挂 1G、2G，Ⅱ 段挂 3G、4G）。
-- 机组容量：PR 取 DUT 的 GENERATOR.maxPPower（3#=6、4#=15）。一次图 D-01 则是 3G=15MW、4G=6MW，
-  两边相反，待裁定（电气量波动规划 §5.2 的 D7）。若改以一次图为准：把 3#、4# 的 PR 对调后重新生成。
+- 机组容量：PR 即上面的铭牌有功（按一次图）。若日后改回以 DUT 表为准：把 3#、4# 的 PR 对调后重新生成。
 
 改这里的 UNITS / BUSES 后重新运行：  python gen_electrical_layer.py
 产物与 electrical-layer-20261127.sql 同目录；SQL 可重放（UPDATE 幂等、INSERT OR REPLACE）。
@@ -21,12 +21,12 @@ import os
 SQ3 = "1.7320508075688772"
 PLC, NCS = "PLC-仿真", "NCS-仿真"
 
-# unit -> 点号、PLC 侧派发遥设与指令反馈、铭牌有功（GENERATOR.maxPPower）
+# unit -> 点号、PLC 侧派发遥设与指令反馈、铭牌有功（一次图 D-01：6/15/15/6 MW）
 UNITS = {
     1: dict(P="YC501", F="YC502", Q="YC503", Uab="YC504", Ubc="YC505", Uca="YC506", Ia="YC507", Ib="YC508", Ic="YC509", PF="YC515", YS="YS1", FB="YC301", PR=6),
     2: dict(P="YC601", F="YC602", Q="YC603", Uab="YC604", Ubc="YC605", Uca="YC606", Ia="YC607", Ib="YC608", Ic="YC609", PF="YC615", YS="YS4", FB="YC303", PR=15),
-    3: dict(P="YC901", F="YC902", Q="YC903", Uab="YC904", Ubc="YC905", Uca="YC906", Ia="YC907", Ib="YC908", Ic="YC909", PF="YC915", YS="YS6", FB="YC305", PR=6),
-    4: dict(P="YC1001", F="YC1002", Q="YC1003", Uab="YC1004", Ubc="YC1005", Uca="YC1006", Ia="YC1007", Ib="YC1008", Ic="YC1009", PF="YC1015", YS="YS7", FB="YC307", PR=15),
+    3: dict(P="YC901", F="YC902", Q="YC903", Uab="YC904", Ubc="YC905", Uca="YC906", Ia="YC907", Ib="YC908", Ic="YC909", PF="YC915", YS="YS6", FB="YC305", PR=15),
+    4: dict(P="YC1001", F="YC1002", Q="YC1003", Uab="YC1004", Ubc="YC1005", Uca="YC1006", Ia="YC1007", Ib="YC1008", Ic="YC1009", PF="YC1015", YS="YS7", FB="YC307", PR=6),
 }
 BUSES = {
     1: dict(Uab="YC219", Ubc="YC220", Uca="YC221", P="YC222", Q="YC223", COS="YC224", F="YC225", Ia="YC216", Ib="YC217", Ic="YC218", units=(1, 2)),
@@ -104,7 +104,7 @@ def render():
     a("--    两段母线电压 10.5±0.08、四台机组功率因数 0.8±0.008（带宽仍来自 band-20261127.sql）")
     a("UPDATE point_yc SET min_limit=-2147480000, max_limit=2147480000")
     a(" WHERE channel_id=2 AND code NOT IN (%s);" % ", ".join(_q(c) for c in drivers))
-    a("-- 2) 既有 8 条映射只改公式：机组有功 / 指令反馈 = 派发值限制在 [Pmin=0, Pmax=铭牌]（GENERATOR 表）")
+    a("-- 2) 既有 8 条映射只改公式：机组有功 / 指令反馈 = 派发值限制在 [Pmin=0, Pmax=铭牌]（铭牌按一次图 D-01：6/15/15/6 MW）")
     for dev, t, f in upd:
         a("UPDATE point_mapping SET formula=%s WHERE device_name=%s AND target_point_code=%s;" % (_q(f), _q(dev), _q(t)))
     a("-- 3) 新增 49 条派生映射。目标点被映射锁定：不再参与模拟，也不接受人工写值（补丁⑩）")
