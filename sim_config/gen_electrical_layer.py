@@ -9,7 +9,9 @@
 - GENERATOR：1#~4# 机组 maxPPower=6/15/6/15 MW、minPPower=0；每台机组 9 个测量点的点号
   P/F/Q/Uab/Ubc/Uca/Ia/Ib/Ic = 501~509 / 601~609 / 901~909 / 1001~1009（cosφ 为 515/615/915/1015）。
 - 母线归属：BUSBAR_AGC_UP/DOWN_ADJUST_DEV 只把 1#、2# 列在 1# 母线下，据此取
-  母线 1 ← 1#、2#，母线 2 ← 3#、4#（待对照一次图 D-01 核实）。
+  母线 1 ← 1#、2#，母线 2 ← 3#、4#（2026-11-27 已对照一次图 D-01 核实：Ⅰ 段挂 1G、2G，Ⅱ 段挂 3G、4G）。
+- 机组容量：PR 取 DUT 的 GENERATOR.maxPPower（3#=6、4#=15）。一次图 D-01 则是 3G=15MW、4G=6MW，
+  两边相反，待裁定（电气量波动规划 §5.2 的 D7）。若改以一次图为准：把 3#、4# 的 PR 对调后重新生成。
 
 改这里的 UNITS / BUSES 后重新运行：  python gen_electrical_layer.py
 产物与 electrical-layer-20261127.sql 同目录；SQL 可重放（UPDATE 幂等、INSERT OR REPLACE）。

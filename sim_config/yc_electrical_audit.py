@@ -33,13 +33,13 @@ import urllib.request
 
 SQ3 = math.sqrt(3)
 PLC, NCS = "PLC-仿真", "NCS-仿真"
-UNITS = {  # 点号、铭牌有功（MW）、PLC 侧派发遥设与指令反馈
+UNITS = {  # 点号、铭牌有功（MW；取 DUT 的 GENERATOR 表：3#=6、4#=15。一次图与此相反，见电气量波动规划 §5.2 的 D7）、PLC 侧派发遥设与指令反馈
     1: dict(P="YC501", F="YC502", Q="YC503", Uab="YC504", Ubc="YC505", Uca="YC506", Ia="YC507", Ib="YC508", Ic="YC509", PF="YC515", YS="YS1", FB="YC301", PR=6.0),
     2: dict(P="YC601", F="YC602", Q="YC603", Uab="YC604", Ubc="YC605", Uca="YC606", Ia="YC607", Ib="YC608", Ic="YC609", PF="YC615", YS="YS4", FB="YC303", PR=15.0),
     3: dict(P="YC901", F="YC902", Q="YC903", Uab="YC904", Ubc="YC905", Uca="YC906", Ia="YC907", Ib="YC908", Ic="YC909", PF="YC915", YS="YS6", FB="YC305", PR=6.0),
     4: dict(P="YC1001", F="YC1002", Q="YC1003", Uab="YC1004", Ubc="YC1005", Uca="YC1006", Ia="YC1007", Ib="YC1008", Ic="YC1009", PF="YC1015", YS="YS7", FB="YC307", PR=15.0),
 }
-BUSES = {  # 母线归属按 DUT 的 AGC 调节设备表：1# 母线 ← 1#、2# 机组；2# 母线 ← 3#、4# 机组
+BUSES = {  # 母线归属按 DUT 的 AGC 调节设备表：1# 母线 ← 1#、2# 机组；2# 母线 ← 3#、4# 机组（一次图 D-01 已核实）
     1: dict(Uab="YC219", Ubc="YC220", Uca="YC221", P="YC222", Q="YC223", COS="YC224", F="YC225", Ia="YC216", Ib="YC217", Ic="YC218", units=(1, 2)),
     2: dict(Uab="YC232", Ubc="YC233", Uca="YC234", P="YC235", Q="YC236", COS="YC237", F="YC238", Ia="YC229", Ib="YC230", Ic="YC231", units=(3, 4)),
 }
