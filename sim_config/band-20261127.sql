@@ -1,3 +1,5 @@
+-- 在跑实例可能正持有写锁（WAL 下读写并行，但同一时刻只能有一个写者）：等 5 s 再报 "database is locked"
+.timeout 5000
 BEGIN;
 UPDATE point_yc SET min_limit=49.97, max_limit=50.03 WHERE code IN ('YC502','YC602','YC902','YC1002','YC225','YC238');
 UPDATE point_yc SET min_limit=4.3, max_limit=4.7 WHERE code IN ('YC503','YC903','YC223');

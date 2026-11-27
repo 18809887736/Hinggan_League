@@ -1,0 +1,139 @@
+diff --git a/ems_simulate/src/device/core/device.py b/ems_simulate/src/device/core/device.py
+index fb442fc..d4fc120 100644
+--- a/ems_simulate/src/device/core/device.py
++++ b/ems_simulate/src/device/core/device.py
+@@ -246,6 +246,8 @@ class Device:
+         # 添加测点
+         all_points = self.point_manager.get_all_points()
+         self.protocol_handler.add_points(all_points)
++        # 本地补丁9（r2）：窄带宽遥测初值（带宽中心）推到协议层，不按「开始」线上也是合理值
++        self.simulation_controller.push_band_initial_values()
+ 
+     # 初始化方法
+     def initModbusTcpServer(self, port: int, protocol_type: ProtocolType = ProtocolType.ModbusTcpServer) -> None:
+@@ -1127,6 +1129,8 @@ class Device:
+             self.protocol_handler.initialize(self._build_protocol_config())
+             all_points = self.point_manager.get_all_points()
+             self.protocol_handler.add_points(all_points)
++            # 本地补丁9（r2）：重建 handler 后协议层值丢失，重推窄带宽遥测当前值
++            self.simulation_controller.push_band_initial_values()
+ 
+     # ===== 模拟控制（委托给 SimulationController） =====
+ 
+diff --git a/ems_simulate/src/device/simulator/simulation_controller.py b/ems_simulate/src/device/simulator/simulation_controller.py
+index d9acc0e..aa1c660 100644
+--- a/ems_simulate/src/device/simulator/simulation_controller.py
++++ b/ems_simulate/src/device/simulator/simulation_controller.py
+@@ -1,10 +1,34 @@
++import math
+ import threading
++import zlib
+ 
+ from src.device.simulator.log import log
+ from src.device.simulator.point_simulator import PointSimulator
+ from src.enums.point_data import SimulateMethod, Yc, Yt, Yx
+ from src.enums.points.change_tracker import ChangeSource, track_change
+ 
++# 本地补丁9（r2）：窄带宽判定阈值（max - min）。宽限值（±1e9 / ±2.1e9 原样）视为「未配带宽」。
++# 与 sim_config/band-check-20261127.sql 第③段阈值保持一致。
++BAND_MAX_WIDTH = 1000.0
++# 本地补丁9（r3）：窄带宽点的正弦周期逐点取 40~89 s（上游恒为 60 s）。
++BAND_CYCLE_MIN_S = 40.0
++BAND_CYCLE_SPAN_S = 50
++
++
++def _stable_hash(code, salt: str) -> int:
++    """本地补丁9（r3）：点码加盐的 CRC32，跨进程稳定（不受 PYTHONHASHSEED 影响）。"""
++    return zlib.crc32(f"{salt}:{code}".encode())
++
++
++def _stable_phase(code) -> float:
++    """本地补丁9（r3）：点码 → [0, 2π) 内的固定相位。"""
++    return (_stable_hash(code, "phase") % 3600) * math.pi / 1800.0
++
++
++def _stable_cycle(code) -> float:
++    """本地补丁9（r3）：点码 → 40~89 s 的固定正弦周期。"""
++    return BAND_CYCLE_MIN_S + _stable_hash(code, "cycle") % int(BAND_CYCLE_SPAN_S)
++
+ 
+ class SimulationController:
+     def __init__(self, device):
+@@ -23,11 +47,77 @@ class SimulationController:
+             addr = str(point.hex_address)
+             if addr.endswith(".q") or addr.endswith(".t") or addr.endswith(".dU"):
+                 return
++        # 本地补丁9（r2）：出厂默认 (Random, 参与) 一律改按库带宽推导——
++        #   窄带宽遥测（见 _is_band_point）：正弦参与，且建点即置带宽中心（内存值；
++        #     协议层由 push_band_initial_values 在 initProtocol 末尾推送）；
++        #   其余（遥信/遥控/遥调/宽限值遥测）：不参与。
++        # 5 处调用点（device.py:484/632/1215、point_operator.py:588/658）统一传 (Random, 1, True)，
++        # 在此单点覆盖即等价于改全部调用点；只覆盖出厂默认，显式传入其它方式的调用不受影响。
++        # 「模拟配置」对话框 / apply-simulation-config 不经过此处；设备重建时随后的
++        # _restore_point_configuration 仍会恢复内存中的手动配置。
++        band_point = False
++        if simulate_method == SimulateMethod.Random and is_running:
++            if self._is_band_point(point):
++                simulate_method = SimulateMethod.SineWave
++                band_point = True
++                point.set_real_value((point.min_value_limit + point.max_value_limit) / 2)
++            else:
++                is_running = False
+         simulator = PointSimulator(point, simulate_method, step)
+         simulator.is_running = is_running
++        # 本地补丁9（r3）：窄带宽点的相位与周期都按点码固定取值，各点起伏互相错开。
++        # r2 全体同相位 0、同周期 60 s，隔离实测任意两点的相关系数 = 1.000，看起来像齐涨齐落。
++        # 只错相位不够：同周期正弦的相关系数 = |cos Δφ|，随机相位下仍有约三成的点对 >0.9；
++        # 周期也逐点不同（40~89 s）后，64 s 窗口内这一比例降到约一成，且随观察窗口变长继续下降。
++        # 初值不受影响：建点仍置带宽中心，只有按「开始」后正弦才从各自相位起步。
++        if band_point:
++            simulator.phase = _stable_phase(point.code)
++            simulator.cycle = _stable_cycle(point.code)
+         self.points[point] = simulator
+         self._restore_point_configuration(point, simulator)
+ 
++    @staticmethod
++    def _is_band_point(point) -> bool:
++        """本地补丁9（r2）：窄带宽遥测 = Yc 且 0 < max - min <= BAND_MAX_WIDTH。"""
++        return (
++            isinstance(point, Yc)
++            and point.min_value_limit < point.max_value_limit
++            and point.max_value_limit - point.min_value_limit <= BAND_MAX_WIDTH
++        )
++
++    def push_band_initial_values(self) -> int:
++        """本地补丁9（r2）：把窄带宽遥测的当前内存值推到协议层（Modbus 寄存器 / c104 点）。
++
++        导入测点、建 c104 监视点、建 Modbus 数据区（全 0）都不读点值，内存初值不推送则
++        线上仍为 0。由 Device.initProtocol / _reinit_protocol_for_iec104 在 add_points 之后调用。
++        映射锁定点跳过（由映射驱动）。
++        """
++        # 本地补丁9（r3）：客户端设备整体不推送——客户端的可写点（如 Modbus 客户端的
++        # func 3 遥测）会把初值写进远端设备；104 客户端写 Yc/Yx 则每点报一次 warning。
++        from src.device.protocol.base_handler import ClientHandler
++
++        if isinstance(getattr(self.device, "protocol_handler", None), ClientHandler):
++            return 0
++        pushed = 0
++        for point in tuple(self.points):
++            if not self._is_band_point(point) or getattr(point, "is_locked_by_mapping", False):
++                continue
++            try:
++                slave_id = int(point.rtu_addr) if getattr(point, "rtu_addr", None) else None
++                self.device.editPointData(
++                    point.code,
++                    point.real_value,
++                    source=ChangeSource.SIMULATION,
++                    detail=f"补丁9 初值 {point.code}",
++                    slave_id=slave_id,
++                )
++                pushed += 1
++            except (ValueError, SystemError) as exc:
++                log.warning(f"补丁9 初值推送跳过 {point.code}: {exc}")
++        if pushed:
++            log.info(f"补丁9: 已推送 {pushed} 个带宽测点初值到协议层")
++        return pushed
++
+     @staticmethod
+     def _configuration_key(point) -> tuple:
+         return (str(point.rtu_addr), point.frame_type, point.code)
