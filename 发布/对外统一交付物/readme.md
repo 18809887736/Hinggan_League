@@ -8,7 +8,7 @@
 |---|---|---|
 | `部署说明.md` | ✓ | 目标机 5 步部署 + 已知事项（杀软/大小写/假活等） |
 | `割接与回滚手册.md` | ✓ | DUT 切换与回滚完整操作序列 |
-| `scripts/` | ✓ | start / stop / set-site / write-baseline / allow-ports（PowerShell） |
+| `scripts/` | ✓ | start / start-master / stop / set-site / write-baseline / allow-ports（PowerShell） |
 | `assets/ems.dump.sql` | ✓ | 迁移基线库的文本 dump（24 表对账过的快照，make-package 由此重建 ems.db） |
 | `make-package.ps1` | ✓ | 一键组装 `ems-sim-win-<版本>/` 与 zip |
 | `ems-sim-win-*/`、`*.zip` | ✗ gitignore | 组装产物（约 130MB），走拷贝分发（GitHub 单文件 100MB 上限） |
