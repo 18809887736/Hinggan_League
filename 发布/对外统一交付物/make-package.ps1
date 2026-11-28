@@ -43,6 +43,7 @@ type = db
 host = 127.0.0.1
 port = 8991
 open_browser = true
+show_unit_column = true
 "@ | Set-Content (Join-Path $out 'config.ini') -Encoding UTF8
 [IO.File]::WriteAllText((Join-Path $out 'version.txt'), $Version)
 Write-Host '[2/6] config.ini 已生成（type=sqlite，启动后自动开浏览器）；version.txt = ' $Version
@@ -64,6 +65,7 @@ Write-Host '[4/6] source\ 已拷入（GPL 全源码）'
 New-Item -ItemType Directory (Join-Path $out 'tools') | Out-Null
 Copy-Item (Join-Path $repo 'sim_config\ems_local.py') (Join-Path $out 'tools\')
 Copy-Item $sqlite (Join-Path $out 'tools\')
+Copy-Item (Join-Path $repo 'sim_config\point-units-20261128.sql') (Join-Path $out 'tools\')
 robocopy (Join-Path $here 'scripts') (Join-Path $out 'scripts') /E /NFL /NDL /NJH /NJS /NP | Out-Null
 Copy-Item (Join-Path $here '部署说明.md') $out
 Copy-Item (Join-Path $here '割接与回滚手册.md') $out

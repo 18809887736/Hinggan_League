@@ -61,7 +61,7 @@ class Config:
         try:
             config = ConfigParser()
             if os.path.exists(config_file):
-                config.read(config_file, encoding="utf8")
+                config.read(config_file, encoding="utf-8-sig")  # 本地补丁12: 兼容带 BOM 的 config.ini（交付包里那份此前一直没被读取）
 
                 # 数据库类型配置
                 if "database" in config:

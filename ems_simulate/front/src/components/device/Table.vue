@@ -947,6 +947,15 @@ const hiddenColumns = computed(() => {
   // 始终隐藏16进制地址列（已合并到地址列）
   const hidden = ["16进制地址", "地址"];
 
+  // 本地补丁12: config.ini [server] show_unit_column = false 时隐藏「单位」列（标记由后端首页路由注入）
+  if (
+    document
+      .querySelector('meta[name="ems-show-unit-column"]')
+      ?.getAttribute("content") === "false"
+  ) {
+    hidden.push("单位");
+  }
+
   // 非Modbus协议，隐藏相关专有列
   if (!isModbus.value) {
     hidden.push("位", "功能码", "解析码");

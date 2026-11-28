@@ -79,6 +79,7 @@ class DbController:
             self._migrate_channel_point_table_mode_schema()
             self._migrate_channel_change_tracking_schema()
             self._migrate_dnp3_point_config_schema()
+            self._migrate_point_unit_schema()
             self._migrate_goose_schema()
             self._migrate_channel_security_schema()
 
@@ -164,6 +165,7 @@ class DbController:
             self._migrate_channel_point_table_mode_schema()
             self._migrate_channel_change_tracking_schema()
             self._migrate_dnp3_point_config_schema()
+            self._migrate_point_unit_schema()
             self._migrate_goose_schema()
             self._migrate_channel_security_schema()
 
@@ -272,6 +274,20 @@ class DbController:
             if "dnp3_config" not in columns:
                 with engine.begin() as conn:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN dnp3_config TEXT"))
+
+    def _migrate_point_unit_schema(self) -> None:
+        """本地补丁12: 给旧的 point_yc 补工程单位列（仅显示用）。可重复执行。"""
+        if not self.db_config:
+            return
+        from sqlalchemy import inspect, text
+
+        engine = self.db_config.engine
+        inspector = inspect(engine)
+        if "point_yc" not in inspector.get_table_names():
+            return
+        if "unit" not in {column["name"] for column in inspector.get_columns("point_yc")}:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE point_yc ADD COLUMN unit VARCHAR(64)"))
 
     def _backfill_legacy_dlt645_standard_tables(self) -> None:
         """Recognize legacy standard tables by their complete DI code set."""

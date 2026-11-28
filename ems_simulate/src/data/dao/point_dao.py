@@ -380,6 +380,7 @@ class PointDao:
                     fc=point_data.get("fc"),
                     dnp3_config=_serialize_dnp3_config(point_data, 0),
                     enable=point_data.get("enable", True),
+                    unit=point_data.get("unit"),  # 本地补丁12: 复制设备时带上工程单位
                 )
                 session.add(point)
                 session.flush()

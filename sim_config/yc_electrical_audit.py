@@ -7,7 +7,7 @@
   python yc_electrical_audit.py --seconds 60            # 连续采样 60 s（波动中，按瞬态容差统计）
   python yc_electrical_audit.py --seconds 100 --corr    # 同上，并检查波形是否错开（各量独立漂移）
 
-只调用 /api/points/batch-values 与 /api/points/info（均为读操作），不写任何值。
+只调用 /api/points/batch-values、/api/points/info、/api/devices/slave-id-list 与 /api/devices/table（均为读操作），不写任何值。
 退出码：0 = 全部通过；1 = 有不通过项。
 
 判据（每一条不满足都算违规）：
@@ -21,6 +21,9 @@
            同一母线电压等于所挂机组机端电压；全系统频率一致。
   D 边界   库里设了带宽的点（0 < 上限−下限 ≤ 1000），当前值落在带宽内。
   E 波形   （仅 --corr）按「开始」后 NCS 带宽点的两两相关系数：中位数 <0.6，且 >0.9 的点对不超过四成。
+  U 单位   三个设备的每个 YC 点，页面上显示的单位等于期望单位（P=MW、Q=Mvar、U=kV、I=A、F=Hz、cosφ=—；
+           PLC 的上下限与指令反馈=MW、调节速度=MW/min）。期望单位取自本脚本里量的分类，显示单位取自表格接口，
+           两者是独立来源。有量纲的点是空的、写错了、新增点没配，都在这里查出来。需要仿真器 1.0.4 及以上。
 
 静止态（未按「开始」或已「停止」）要求各恒等式严格成立。波动中派生量由映射逐条更新，采样落在更新窗口内
 会看到亚秒级的小偏差（量级 = 源点一拍的漂移量），用 --seconds 采样时按较宽的瞬态容差判定，
@@ -53,11 +56,27 @@ BUSES = {  # 母线归属按 DUT 的 AGC 调节设备表：1# 母线 ← 1#、2#
 # 12 个参数点的定值：上限=铭牌（6/15/15/6）、下限=0、调节速度按容量取 3.5（6 MW）/ 4.0（15 MW），均为 INT16 截断后的读数
 PLC_FIXED = {"YC512": 6, "YC1012": 6, "YC612": 15, "YC912": 15, "YC513": 0, "YC613": 0, "YC913": 0, "YC1013": 0,
              "YC514": 3, "YC1014": 3, "YC614": 4, "YC914": 4}
+MASTER = "主站-仿真"
+DASH = "—"  # 无量纲量（功率因数）在页面上显示的单位
+UNIT_SYMBOL = {"P": "MW", "F": "Hz", "Q": "Mvar", "Uab": "kV", "Ubc": "kV", "Uca": "kV",
+               "Ia": "A", "Ib": "A", "Ic": "A", "PF": DASH, "COS": DASH}
+SPEED = {"YC514", "YC614", "YC914", "YC1014"}  # 调节速度：图纸称"机组响应速率"，单位按惯例取 MW/min（数值借自 singleMaxDeltaP，待 DCS 量程确认）
+EXPECT_UNIT = {PLC: {}, NCS: {}, MASTER: {"YC101": "MW", "YC103": "MW"}}
+for _u in UNITS.values():
+    EXPECT_UNIT[PLC][_u["FB"]] = "MW"
+    for _k in ("P", "F", "Q", "Uab", "Ubc", "Uca", "Ia", "Ib", "Ic", "PF"):
+        EXPECT_UNIT[NCS][_u[_k]] = UNIT_SYMBOL[_k]
+for _b in BUSES.values():
+    for _k in ("Uab", "Ubc", "Uca", "P", "Q", "COS", "F", "Ia", "Ib", "Ic"):
+        EXPECT_UNIT[NCS][_b[_k]] = UNIT_SYMBOL[_k]
+for _c in PLC_FIXED:
+    EXPECT_UNIT[PLC][_c] = "MW/min" if _c in SPEED else "MW"
 # 容差：第一列静止态（严格），第二列波动中的瞬态。
 # 波动时派生量由映射逐条更新，采样若落在更新窗口内会看到"一半新一半旧"，偏差量级 = 源点一拍的漂移量
 #（隔离实测：电流 ≤2 A、无功 ≤0.06 Mvar、频率 ≤0.01 Hz），持续不到 0.1 s；停止波动后恢复严格一致。
 TOL = {"P": (0.01, 0.01), "S": (0.01, 0.05), "Q": (0.01, 0.05), "I": (0.05, 3.0), "U": (0.005, 0.02), "F": (0.005, 0.012), "SUM": (0.005, 0.08),
-       "DEV": (0.0005, 0.02)}  # DEV：实发与指令反馈之差超出跟踪偏差上限的量
+       "DEV": (0.0005, 0.02),  # DEV：实发与指令反馈之差超出跟踪偏差上限的量
+       "UNIT": (0, 0)}  # UNIT：单位不符的条数（0 为通过）。注意 U 是电压的容差键，不要混用
 
 
 def post(base, path, obj, timeout=20):
@@ -79,6 +98,44 @@ def limits(base, dev, codes):
         d = post(base, "/api/points/info", {"device_name": dev, "point_code": c}).get("data") or {}
         out[c] = (d.get("min_value"), d.get("max_value"))
     return out
+
+
+def shown_units(base, dev):
+    """页面表格里每个遥测点显示的单位：({测点编码: 单位}, 表格接口是否带单位列)。行内第 9 位（从 0 数）是单位。"""
+    out, has = {}, None
+    slaves = post(base, "/api/devices/slave-id-list", {"device_name": dev}).get("data") or []
+    for sid in slaves:
+        data = post(base, "/api/devices/table", {"device_name": dev, "slave_id": sid, "point_name": None, "page_index": 1,
+                                                   "page_size": 500, "point_types": [0, 1, 2, 3]}).get("data") or {}
+        for row in data.get("table_data") or []:
+            has = (len(row) >= 16) if has is None else has  # 加列后每行 16 项；1.0.3 及以前是 15 项
+            if len(row) > 12 and row[12] == "遥测":
+                out[row[6]] = (row[9] or "") if len(row) > 9 else None
+    return out, bool(has)
+
+
+def unit_residuals(shown):
+    """返回 {判据名: (不符的条数, "UNIT", 说明)}；说明为空表示通过。"""
+    r = {}
+
+    def put(label, note=""):
+        r[label] = (1 if note else 0, "UNIT", note)
+
+    for dev, expect in EXPECT_UNIT.items():
+        got, has = shown[dev]
+        for code in sorted(expect):
+            want = expect[code]
+            actual = got.get(code, "未找到") if has else "无法读取"
+            label = "U 单位 %s %s = %s" % (dev, code, want)
+            if actual == want:
+                put(label)
+            else:
+                put(label, "显示为 %s%s" % ("空" if actual == "" else actual,
+                                          "" if has else "（表格接口没有单位列：仿真器版本低于 1.0.4？）"))
+        for code in sorted(set(got) - set(expect)):
+            label = "U 单位 %s %s（未分类的遥测点）不为空" % (dev, code)
+            put(label, "" if got[code] else "显示为空：新增的遥测点没有配单位")
+    return r
 
 
 def residuals(v, lim):
@@ -171,13 +228,21 @@ def main():
             break
         time.sleep(args.interval)
 
+    # 单位判据与采样无关，只算一次
+    ures = unit_residuals({dev: shown_units(base, dev) for dev in EXPECT_UNIT})
+    for name, (res, unit_key, _) in ures.items():
+        worst[name] = (res, TOL[unit_key][0])
+
     failed = {k: t for k, t in worst.items() if t[0] > t[1]}
-    print("YC 电气性审计  目标=%s  采样=%d 次  判据=%d 条" % (base, n, len(worst)))
+    print("YC 电气性审计  目标=%s  采样=%d 次  判据=%d 条（含单位判据 %d 条）" % (base, n, len(worst), len(ures)))
     for name, (res, tol) in worst.items():
-        if name not in failed:
+        if name not in failed or name in ures:
             continue
         detail = "无法计算（电压或功率因数为 0）" if math.isinf(res) else "最大偏差 %.4f（容差 %g）" % (res, tol)
         print("  [不通过] %-44s %s" % (name, detail))
+    for name, (_, _, note) in ures.items():
+        if name in failed:
+            print("  [不通过] %-44s %s" % (name, note))
     sfailed = list(failed)
     print("通过 %d 条，不通过 %d 条" % (len(worst) - len(failed), len(failed)))
     if args.seconds:

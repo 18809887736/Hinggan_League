@@ -180,10 +180,25 @@ if __name__ == "__main__":
 
     # 本地补丁⑦：首页注入版本号徽标（右下角小字，免前端重编译；须在 StaticFiles 挂载前注册）
     # 本地补丁⑧：同一路由顺带注入 CSS 隐藏上游页脚版权栏（Copyright © 2026 CDY，App.vue .app-footer）
+    # 本地补丁12: 「单位」列开关（config.ini [server] show_unit_column，默认 true）。每次返回首页时重读，改完刷新页面即生效。
+    # 只用独立的 ConfigParser 读这一个键：Config.load_config() 会在运行中改写 db_type、web_port 等类属性，不能在这里调用。
+    def _show_unit_column() -> bool:
+        try:
+            from configparser import ConfigParser
+
+            from src.config.config import resolve_config_path
+
+            parser = ConfigParser()
+            parser.read(resolve_config_path(root_dir), encoding="utf-8-sig")
+            return parser.getboolean("server", "show_unit_column", fallback=True)
+        except Exception:
+            return True
+
     @app.get("/", include_in_schema=False)
     async def _index_with_version() -> HTMLResponse:
         html = (static_dir / "index.html").read_text(encoding="utf-8")
         inject = (
+            f'<meta name="ems-show-unit-column" content="{"true" if _show_unit_column() else "false"}">'
             "<style>.app-footer{display:none!important}"
             ".contact-section{display:none!important}</style>"
             '<div style="position:fixed;right:14px;bottom:12px;z-index:9999;'

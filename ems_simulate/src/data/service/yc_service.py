@@ -97,6 +97,7 @@ class YcService:
                 mul_coe=item["mul_coe"],
                 frame_type=0,
                 decode=item["decode_code"] if item.get("decode_code") else "INT32_ABCD",
+                unit=item.get("unit") or "",  # 本地补丁12: 工程单位（仅显示）
             )
 
         elif protocol_type in [
@@ -123,6 +124,7 @@ class YcService:
                 iec_quality=iec_quality,
                 # 本地补丁4: 104 点按库中 decode 构建（原代码漏传导致运行时恒为 INT32_ABCD，小数被整型化）
                 decode=item.get("decode_code") or "FLOAT32_ABCD",
+                unit=item.get("unit") or "",
             )
 
         elif protocol_type in [ProtocolType.Iec61850Server, ProtocolType.Iec61850Client]:
@@ -141,6 +143,7 @@ class YcService:
                 mul_coe=item["mul_coe"],
                 frame_type=0,
                 fc=fc,
+                unit=item.get("unit") or "",
             )
 
         elif protocol_type in [ProtocolType.Dlt645Server, ProtocolType.Dlt645Client]:
@@ -156,6 +159,7 @@ class YcService:
                 add_coe=item["add_coe"],
                 mul_coe=item["mul_coe"],
                 frame_type=0,
+                unit=item.get("unit") or "",
             )
 
         elif protocol_type in [ProtocolType.Dnp3Server, ProtocolType.Dnp3Client]:
@@ -173,6 +177,7 @@ class YcService:
                     add_coe=item["add_coe"],
                     mul_coe=item["mul_coe"],
                     frame_type=0,
+                    unit=item.get("unit") or "",
                 ),
                 item,
                 0,

@@ -28,6 +28,7 @@ class Yc(BasePoint):
         iec_type_id: str | None = None,
         iec_quality: int | None = None,
         fc: str = "",
+        unit: str = "",
     ) -> None:
         super().__init__(
             rtu_addr=rtu_addr,
@@ -47,6 +48,7 @@ class Yc(BasePoint):
         self._min_value_limit: float = float(min_value_limit)
         self._mul_coe: float = float(mul_coe)
         self._add_coe: float = float(add_coe)
+        self.unit = unit or ""  # 本地补丁12: 工程单位（仅显示）
         self._real_value: float = self.value * self.mul_coe + self.add_coe
 
         # Modbus 解析相关

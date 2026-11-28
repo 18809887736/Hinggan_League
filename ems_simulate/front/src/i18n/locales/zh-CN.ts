@@ -747,6 +747,7 @@ export default {
     pointCode: "测点编码",
     pointName: "测点名称",
     realValue: "真实值",
+    unit: "单位",
     status: "状态",
     frameType: "帧类型",
     funcCode: "功能码",

@@ -34,6 +34,7 @@ class PointYcDict(TypedDict):
     iec_type_id: str | None
     fc: str | None
     enable: bool
+    unit: str | None
 
 
 class PointYc(Base):
@@ -62,6 +63,8 @@ class PointYc(Base):
     add_coe: Mapped[float] = mapped_column(Float, server_default="0.0", comment="加系数")
     max_limit: Mapped[float] = mapped_column(Float, comment="上限值")
     min_limit: Mapped[float] = mapped_column(Float, comment="下限值")
+    # 本地补丁12: 工程单位（如 MW、kV），只用于表格显示，不参与计算与报文；列名与长度沿用上游 opcua_point.unit
+    unit: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="工程单位(仅显示)")
 
     # IEC104 特定字段
     iec_common_address: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="IEC104公共地址")

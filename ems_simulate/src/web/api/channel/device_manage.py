@@ -298,6 +298,8 @@ async def _copy_device(req: CopyDeviceRequest | CopySingleDeviceRequest, request
                 point_copy["add_coe"] = point.get("add_coe", 0.0)
                 point_copy["max_limit"] = point.get("max_limit")
                 point_copy["min_limit"] = point.get("min_limit")
+                if frame_type == 0:  # 本地补丁12: 复制设备时带上工程单位
+                    point_copy["unit"] = point.get("unit")
             if frame_type in [1, 2]:
                 point_copy["bit"] = point.get("bit")
             if frame_type == 1:

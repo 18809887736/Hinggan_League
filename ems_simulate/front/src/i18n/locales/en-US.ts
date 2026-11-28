@@ -766,6 +766,7 @@ export default {
     pointCode: "Point Code",
     pointName: "Point Name",
     realValue: "Real Value",
+    unit: "Unit",
     status: "Status",
     frameType: "Frame Type",
     funcCode: "Func Code",

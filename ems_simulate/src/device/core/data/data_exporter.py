@@ -32,6 +32,7 @@ class DataExporter:
             "测点编码",
             "寄存器值",
             "真实值",
+            "单位",  # 本地补丁12: 工程单位列（仅显示）
             "乘法系数",
             "加法系数",
             "帧类型",
@@ -235,6 +236,7 @@ class DataExporter:
             str(point.code),
             reg_val,
             real_val,
+            str(getattr(point, "unit", "") or ""),  # 本地补丁12: 工程单位（仅显示）；遥调点没有 unit，取兼容写法
             str(point.mul_coe),
             str(point.add_coe),
             str(frame_type_dict.get(point.frame_type, "")),
@@ -279,6 +281,7 @@ class DataExporter:
             str(point.code),
             reg_val,
             real_val,
+            "",  # 本地补丁12: 与遥测行的"单位"位对齐
             "1.0",
             "0",
             str(frame_type_dict.get(point.frame_type, "")),

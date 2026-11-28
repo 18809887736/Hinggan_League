@@ -1,0 +1,302 @@
+diff --git a/ems_simulate/front/src/components/device/Table.vue b/ems_simulate/front/src/components/device/Table.vue
+index 0b1cc38..b1dd621 100644
+--- a/ems_simulate/front/src/components/device/Table.vue
++++ b/ems_simulate/front/src/components/device/Table.vue
+@@ -947,6 +947,15 @@ const hiddenColumns = computed(() => {
+   // 始终隐藏16进制地址列（已合并到地址列）
+   const hidden = ["16进制地址", "地址"];
+ 
++  // 本地补丁12: config.ini [server] show_unit_column = false 时隐藏「单位」列（标记由后端首页路由注入）
++  if (
++    document
++      .querySelector('meta[name="ems-show-unit-column"]')
++      ?.getAttribute("content") === "false"
++  ) {
++    hidden.push("单位");
++  }
++
+   // 非Modbus协议，隐藏相关专有列
+   if (!isModbus.value) {
+     hidden.push("位", "功能码", "解析码");
+diff --git a/ems_simulate/front/src/constants/table.ts b/ems_simulate/front/src/constants/table.ts
+index 62d202d..b9c09fb 100644
+--- a/ems_simulate/front/src/constants/table.ts
++++ b/ems_simulate/front/src/constants/table.ts
+@@ -31,6 +31,7 @@ export const TABLE_COLUMN_NAMES = {
+   POINT_NAME: "测点名称",
+   REGISTER_VALUE: "寄存器值",
+   REAL_VALUE: "真实值",
++  UNIT: "单位",
+   MUL_COE: "乘法系数",
+   ADD_COE: "加法系数",
+   BIT: "位",
+@@ -63,6 +64,7 @@ export const TABLE_HEADERS: readonly string[] = [
+   "测点编码",
+   "寄存器值",
+   "真实值",
++  "单位", // 本地补丁12: 工程单位列（仅显示），是否显示由 config.ini 的 show_unit_column 决定
+   "乘法系数",
+   "加法系数",
+   "帧类型",
+@@ -84,6 +86,7 @@ export const HEADER_I18N_MAP: Record<string, string> = {
+   测点编码: "pointCode",
+   寄存器值: "registerValue",
+   真实值: "realValue",
++  单位: "unit",
+   乘法系数: "multiplier",
+   加法系数: "offset",
+   帧类型: "frameType",
+@@ -101,6 +104,7 @@ export const COLUMN_WIDTH_MAP: Record<string, number> = {
+   测点名称: 240,
+   寄存器值: 120,
+   真实值: 120,
++  单位: 70,
+   乘法系数: 80,
+   加法系数: 80,
+   位: 50,
+diff --git a/ems_simulate/front/src/i18n/locales/en-US.ts b/ems_simulate/front/src/i18n/locales/en-US.ts
+index 5321b4d..b6cb765 100644
+--- a/ems_simulate/front/src/i18n/locales/en-US.ts
++++ b/ems_simulate/front/src/i18n/locales/en-US.ts
+@@ -766,6 +766,7 @@ export default {
+     pointCode: "Point Code",
+     pointName: "Point Name",
+     realValue: "Real Value",
++    unit: "Unit",
+     status: "Status",
+     frameType: "Frame Type",
+     funcCode: "Func Code",
+diff --git a/ems_simulate/front/src/i18n/locales/zh-CN.ts b/ems_simulate/front/src/i18n/locales/zh-CN.ts
+index 1f6f346..af673a9 100644
+--- a/ems_simulate/front/src/i18n/locales/zh-CN.ts
++++ b/ems_simulate/front/src/i18n/locales/zh-CN.ts
+@@ -747,6 +747,7 @@ export default {
+     pointCode: "测点编码",
+     pointName: "测点名称",
+     realValue: "真实值",
++    unit: "单位",
+     status: "状态",
+     frameType: "帧类型",
+     funcCode: "功能码",
+diff --git a/ems_simulate/src/config/config.py b/ems_simulate/src/config/config.py
+index 984d991..9e10cb3 100644
+--- a/ems_simulate/src/config/config.py
++++ b/ems_simulate/src/config/config.py
+@@ -61,7 +61,7 @@ class Config:
+         try:
+             config = ConfigParser()
+             if os.path.exists(config_file):
+-                config.read(config_file, encoding="utf8")
++                config.read(config_file, encoding="utf-8-sig")  # 本地补丁12: 兼容带 BOM 的 config.ini（交付包里那份此前一直没被读取）
+ 
+                 # 数据库类型配置
+                 if "database" in config:
+diff --git a/ems_simulate/src/data/controller/db_controller.py b/ems_simulate/src/data/controller/db_controller.py
+index bc82f64..b5396ad 100644
+--- a/ems_simulate/src/data/controller/db_controller.py
++++ b/ems_simulate/src/data/controller/db_controller.py
+@@ -79,6 +79,7 @@ class DbController:
+             self._migrate_channel_point_table_mode_schema()
+             self._migrate_channel_change_tracking_schema()
+             self._migrate_dnp3_point_config_schema()
++            self._migrate_point_unit_schema()
+             self._migrate_goose_schema()
+             self._migrate_channel_security_schema()
+ 
+@@ -164,6 +165,7 @@ class DbController:
+             self._migrate_channel_point_table_mode_schema()
+             self._migrate_channel_change_tracking_schema()
+             self._migrate_dnp3_point_config_schema()
++            self._migrate_point_unit_schema()
+             self._migrate_goose_schema()
+             self._migrate_channel_security_schema()
+ 
+@@ -273,6 +275,20 @@ class DbController:
+                 with engine.begin() as conn:
+                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN dnp3_config TEXT"))
+ 
++    def _migrate_point_unit_schema(self) -> None:
++        """本地补丁12: 给旧的 point_yc 补工程单位列（仅显示用）。可重复执行。"""
++        if not self.db_config:
++            return
++        from sqlalchemy import inspect, text
++
++        engine = self.db_config.engine
++        inspector = inspect(engine)
++        if "point_yc" not in inspector.get_table_names():
++            return
++        if "unit" not in {column["name"] for column in inspector.get_columns("point_yc")}:
++            with engine.begin() as conn:
++                conn.execute(text("ALTER TABLE point_yc ADD COLUMN unit VARCHAR(64)"))
++
+     def _backfill_legacy_dlt645_standard_tables(self) -> None:
+         """Recognize legacy standard tables by their complete DI code set."""
+         if not self.db_config:
+diff --git a/ems_simulate/src/data/dao/point_dao.py b/ems_simulate/src/data/dao/point_dao.py
+index 1842ec3..d7e1a97 100644
+--- a/ems_simulate/src/data/dao/point_dao.py
++++ b/ems_simulate/src/data/dao/point_dao.py
+@@ -380,6 +380,7 @@ class PointDao:
+                     fc=point_data.get("fc"),
+                     dnp3_config=_serialize_dnp3_config(point_data, 0),
+                     enable=point_data.get("enable", True),
++                    unit=point_data.get("unit"),  # 本地补丁12: 复制设备时带上工程单位
+                 )
+                 session.add(point)
+                 session.flush()
+diff --git a/ems_simulate/src/data/model/point_yc.py b/ems_simulate/src/data/model/point_yc.py
+index 1a3968b..7c27880 100644
+--- a/ems_simulate/src/data/model/point_yc.py
++++ b/ems_simulate/src/data/model/point_yc.py
+@@ -34,6 +34,7 @@ class PointYcDict(TypedDict):
+     iec_type_id: str | None
+     fc: str | None
+     enable: bool
++    unit: str | None
+ 
+ 
+ class PointYc(Base):
+@@ -62,6 +63,8 @@ class PointYc(Base):
+     add_coe: Mapped[float] = mapped_column(Float, server_default="0.0", comment="加系数")
+     max_limit: Mapped[float] = mapped_column(Float, comment="上限值")
+     min_limit: Mapped[float] = mapped_column(Float, comment="下限值")
++    # 本地补丁12: 工程单位（如 MW、kV），只用于表格显示，不参与计算与报文；列名与长度沿用上游 opcua_point.unit
++    unit: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="工程单位(仅显示)")
+ 
+     # IEC104 特定字段
+     iec_common_address: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="IEC104公共地址")
+diff --git a/ems_simulate/src/data/service/yc_service.py b/ems_simulate/src/data/service/yc_service.py
+index 4c73b80..2d747d3 100644
+--- a/ems_simulate/src/data/service/yc_service.py
++++ b/ems_simulate/src/data/service/yc_service.py
+@@ -97,6 +97,7 @@ class YcService:
+                 mul_coe=item["mul_coe"],
+                 frame_type=0,
+                 decode=item["decode_code"] if item.get("decode_code") else "INT32_ABCD",
++                unit=item.get("unit") or "",  # 本地补丁12: 工程单位（仅显示）
+             )
+ 
+         elif protocol_type in [
+@@ -123,6 +124,7 @@ class YcService:
+                 iec_quality=iec_quality,
+                 # 本地补丁4: 104 点按库中 decode 构建（原代码漏传导致运行时恒为 INT32_ABCD，小数被整型化）
+                 decode=item.get("decode_code") or "FLOAT32_ABCD",
++                unit=item.get("unit") or "",
+             )
+ 
+         elif protocol_type in [ProtocolType.Iec61850Server, ProtocolType.Iec61850Client]:
+@@ -141,6 +143,7 @@ class YcService:
+                 mul_coe=item["mul_coe"],
+                 frame_type=0,
+                 fc=fc,
++                unit=item.get("unit") or "",
+             )
+ 
+         elif protocol_type in [ProtocolType.Dlt645Server, ProtocolType.Dlt645Client]:
+@@ -156,6 +159,7 @@ class YcService:
+                 add_coe=item["add_coe"],
+                 mul_coe=item["mul_coe"],
+                 frame_type=0,
++                unit=item.get("unit") or "",
+             )
+ 
+         elif protocol_type in [ProtocolType.Dnp3Server, ProtocolType.Dnp3Client]:
+@@ -173,6 +177,7 @@ class YcService:
+                     add_coe=item["add_coe"],
+                     mul_coe=item["mul_coe"],
+                     frame_type=0,
++                    unit=item.get("unit") or "",
+                 ),
+                 item,
+                 0,
+diff --git a/ems_simulate/src/device/core/data/data_exporter.py b/ems_simulate/src/device/core/data/data_exporter.py
+index c0b76cb..38a398f 100644
+--- a/ems_simulate/src/device/core/data/data_exporter.py
++++ b/ems_simulate/src/device/core/data/data_exporter.py
+@@ -32,6 +32,7 @@ class DataExporter:
+             "测点编码",
+             "寄存器值",
+             "真实值",
++            "单位",  # 本地补丁12: 工程单位列（仅显示）
+             "乘法系数",
+             "加法系数",
+             "帧类型",
+@@ -235,6 +236,7 @@ class DataExporter:
+             str(point.code),
+             reg_val,
+             real_val,
++            str(getattr(point, "unit", "") or ""),  # 本地补丁12: 工程单位（仅显示）；遥调点没有 unit，取兼容写法
+             str(point.mul_coe),
+             str(point.add_coe),
+             str(frame_type_dict.get(point.frame_type, "")),
+@@ -279,6 +281,7 @@ class DataExporter:
+             str(point.code),
+             reg_val,
+             real_val,
++            "",  # 本地补丁12: 与遥测行的"单位"位对齐
+             "1.0",
+             "0",
+             str(frame_type_dict.get(point.frame_type, "")),
+diff --git a/ems_simulate/src/enums/points/yc.py b/ems_simulate/src/enums/points/yc.py
+index 35f6ce0..5ea4765 100644
+--- a/ems_simulate/src/enums/points/yc.py
++++ b/ems_simulate/src/enums/points/yc.py
+@@ -28,6 +28,7 @@ class Yc(BasePoint):
+         iec_type_id: str | None = None,
+         iec_quality: int | None = None,
+         fc: str = "",
++        unit: str = "",
+     ) -> None:
+         super().__init__(
+             rtu_addr=rtu_addr,
+@@ -47,6 +48,7 @@ class Yc(BasePoint):
+         self._min_value_limit: float = float(min_value_limit)
+         self._mul_coe: float = float(mul_coe)
+         self._add_coe: float = float(add_coe)
++        self.unit = unit or ""  # 本地补丁12: 工程单位（仅显示）
+         self._real_value: float = self.value * self.mul_coe + self.add_coe
+ 
+         # Modbus 解析相关
+diff --git a/ems_simulate/src/web/api/channel/device_manage.py b/ems_simulate/src/web/api/channel/device_manage.py
+index c12bf81..834fe91 100644
+--- a/ems_simulate/src/web/api/channel/device_manage.py
++++ b/ems_simulate/src/web/api/channel/device_manage.py
+@@ -298,6 +298,8 @@ async def _copy_device(req: CopyDeviceRequest | CopySingleDeviceRequest, request
+                 point_copy["add_coe"] = point.get("add_coe", 0.0)
+                 point_copy["max_limit"] = point.get("max_limit")
+                 point_copy["min_limit"] = point.get("min_limit")
++                if frame_type == 0:  # 本地补丁12: 复制设备时带上工程单位
++                    point_copy["unit"] = point.get("unit")
+             if frame_type in [1, 2]:
+                 point_copy["bit"] = point.get("bit")
+             if frame_type == 1:
+diff --git a/ems_simulate/start_back_end.py b/ems_simulate/start_back_end.py
+index 66ddae5..f197da9 100644
+--- a/ems_simulate/start_back_end.py
++++ b/ems_simulate/start_back_end.py
+@@ -180,10 +180,25 @@ if __name__ == "__main__":
+ 
+     # 本地补丁⑦：首页注入版本号徽标（右下角小字，免前端重编译；须在 StaticFiles 挂载前注册）
+     # 本地补丁⑧：同一路由顺带注入 CSS 隐藏上游页脚版权栏（Copyright © 2026 CDY，App.vue .app-footer）
++    # 本地补丁12: 「单位」列开关（config.ini [server] show_unit_column，默认 true）。每次返回首页时重读，改完刷新页面即生效。
++    # 只用独立的 ConfigParser 读这一个键：Config.load_config() 会在运行中改写 db_type、web_port 等类属性，不能在这里调用。
++    def _show_unit_column() -> bool:
++        try:
++            from configparser import ConfigParser
++
++            from src.config.config import resolve_config_path
++
++            parser = ConfigParser()
++            parser.read(resolve_config_path(root_dir), encoding="utf-8-sig")
++            return parser.getboolean("server", "show_unit_column", fallback=True)
++        except Exception:
++            return True
++
+     @app.get("/", include_in_schema=False)
+     async def _index_with_version() -> HTMLResponse:
+         html = (static_dir / "index.html").read_text(encoding="utf-8")
+         inject = (
++            f'<meta name="ems-show-unit-column" content="{"true" if _show_unit_column() else "false"}">'
+             "<style>.app-footer{display:none!important}"
+             ".contact-section{display:none!important}</style>"
+             '<div style="position:fixed;right:14px;bottom:12px;z-index:9999;'
