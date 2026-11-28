@@ -35,6 +35,8 @@ class DeviceController:
         self.enerey_meter: Device | None = None
         # 数据同步线程
         self.data_sync_thread: DataUpdateThread = DataUpdateThread(task=self._sync_task)
+        # 本地补丁11：随程序启动自动「开启设备」的通道名（TCP 服务端通道，取自通道表 conn_type=2）
+        self.auto_start_device_names: set[str] = set()
 
     def _sync_task(self):
         """数据同步任务，每秒执行一次"""
@@ -144,6 +146,7 @@ class DeviceController:
                 conn_type = channel["conn_type"]
                 ip = channel.get("ip", Config.DEFAULT_IP)
                 port = channel.get("port", Config.DEFAULT_PORT)
+                auto_start = False  # 本地补丁11：TCP 服务端通道随程序启动自动「开启设备」
 
                 log.info(f"导入设备: {channel_code}")
 
@@ -177,6 +180,8 @@ class DeviceController:
                 ):  # TCP 客户端
                     general_device_builder.setDeviceNetConfig(port=port, ip=ip)
                 else:  # TCP 服务端
+                    # 本地补丁11：服务端通道一启动就监听，不必再手动「开启设备」；客户端通道不在此列
+                    auto_start = conn_type == 2
                     general_device_builder.setDeviceNetConfig(
                         port=port,
                         ip=ip or Config.DEFAULT_IP,
@@ -219,7 +224,7 @@ class DeviceController:
                     or channel_protocol_type == ProtocolType.Dlt645Server
                 )
 
-                return general_device, is_energy_meter
+                return general_device, is_energy_meter, auto_start
 
             results = []
             for channel in channel_list:
@@ -233,12 +238,14 @@ class DeviceController:
                 if isinstance(result, Exception):
                     log.error(f"创建设备失败: {result}")
                     continue
-                general_device, is_energy_meter = result
+                general_device, is_energy_meter, auto_start = result
                 if general_device is not None:
                     self.device_list.append(general_device)
                     self.device_map[general_device.name] = general_device
                     if is_energy_meter:
                         self.enerey_meter = general_device
+                    if auto_start:
+                        self.auto_start_device_names.add(general_device.name)
 
             # 所有设备创建完成后，设置提供者（此时可以安全地解析跨设备依赖）
             from src.data.service.point_mapping_service import PointMappingService
@@ -314,6 +321,18 @@ class DeviceController:
             await asyncio.to_thread(self.data_sync_thread.stop, 2.0)
             log.info("数据同步线程已停止")
 
+    async def start_auto_start_devices(self) -> None:
+        """本地补丁11：程序启动后自动开启 TCP 服务端通道的设备；一台失败只记日志，不影响其他设备。"""
+        for device in tuple(self.device_list):
+            if device.name not in self.auto_start_device_names:
+                continue
+            try:
+                started = await device.start()
+            except Exception as exc:
+                log.error(f"自动开启设备异常: {device.name}: {exc}")
+                continue
+            log.info(f"补丁11: 自动开启设备{'成功' if started else '失败'}: {device.name}")
+
     async def shutdown(self) -> None:
         """释放控制器拥有的设备、线程、协议和日志资源。"""
         await self.stop_all_modbus_server()
@@ -325,6 +344,7 @@ class DeviceController:
         self.device_list.clear()
         self.device_map.clear()
         self.enerey_meter = None
+        self.auto_start_device_names.clear()
 
         # 默认 current_device 不一定属于 device_list，也需要释放计算线程池。
         if self.current_device is not None:
@@ -340,6 +360,7 @@ async def _create_device_controller() -> DeviceController:
     controller = DeviceController()
     try:
         await controller.import_device()
+        await controller.start_auto_start_devices()  # 本地补丁11：服务端通道随程序启动自动开启
     except BaseException:
         with suppress(Exception):
             await controller.shutdown()

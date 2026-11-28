@@ -48,10 +48,10 @@ INSERT INTO point_mapping VALUES(1,'PLC-仿真','YC301','[{"device_name": "PLC-\
 INSERT INTO point_mapping VALUES(2,'PLC-仿真','YC303','[{"device_name": "PLC-\u4eff\u771f", "point_code": "YS4", "alias": "YS4"}]','min(max(YS4, 0), 15)',1);
 INSERT INTO point_mapping VALUES(3,'PLC-仿真','YC305','[{"device_name": "PLC-\u4eff\u771f", "point_code": "YS6", "alias": "YS6"}]','min(max(YS6, 0), 15)',1);
 INSERT INTO point_mapping VALUES(4,'PLC-仿真','YC307','[{"device_name": "PLC-\u4eff\u771f", "point_code": "YS7", "alias": "YS7"}]','min(max(YS7, 0), 6)',1);
-INSERT INTO point_mapping VALUES(5,'NCS-仿真','YC501','[{"device_name": "PLC-\u4eff\u771f", "point_code": "YS1", "alias": "YS1"}]','min(max(YS1, 0), 6)',1);
-INSERT INTO point_mapping VALUES(6,'NCS-仿真','YC601','[{"device_name": "PLC-\u4eff\u771f", "point_code": "YS4", "alias": "YS4"}]','min(max(YS4, 0), 15)',1);
-INSERT INTO point_mapping VALUES(7,'NCS-仿真','YC901','[{"device_name": "PLC-\u4eff\u771f", "point_code": "YS6", "alias": "YS6"}]','min(max(YS6, 0), 15)',1);
-INSERT INTO point_mapping VALUES(8,'NCS-仿真','YC1001','[{"device_name": "PLC-\u4eff\u771f", "point_code": "YS7", "alias": "YS7"}]','min(max(YS7, 0), 6)',1);
+INSERT INTO point_mapping VALUES(5,'NCS-仿真','YC501','[{"device_name": "PLC-仿真", "point_code": "YS1", "alias": "YS1"}, {"device_name": "NCS-仿真", "point_code": "YC515", "alias": "PF"}]','min(max(min(max(YS1, 0), 6) + min(max(2.5 * (PF - 0.8), -0.02), 0.02), 0), 6)',1);
+INSERT INTO point_mapping VALUES(6,'NCS-仿真','YC601','[{"device_name": "PLC-仿真", "point_code": "YS4", "alias": "YS4"}, {"device_name": "NCS-仿真", "point_code": "YC615", "alias": "PF"}]','min(max(min(max(YS4, 0), 15) + min(max(5.625 * (PF - 0.8), -0.045), 0.045), 0), 15)',1);
+INSERT INTO point_mapping VALUES(7,'NCS-仿真','YC901','[{"device_name": "PLC-仿真", "point_code": "YS6", "alias": "YS6"}, {"device_name": "NCS-仿真", "point_code": "YC915", "alias": "PF"}]','min(max(min(max(YS6, 0), 15) + min(max(5.625 * (PF - 0.8), -0.045), 0.045), 0), 15)',1);
+INSERT INTO point_mapping VALUES(8,'NCS-仿真','YC1001','[{"device_name": "PLC-仿真", "point_code": "YS7", "alias": "YS7"}, {"device_name": "NCS-仿真", "point_code": "YC1015", "alias": "PF"}]','min(max(min(max(YS7, 0), 6) + min(max(2.5 * (PF - 0.8), -0.02), 0.02), 0), 6)',1);
 INSERT INTO point_mapping VALUES(58,'NCS-仿真','YC505','[{"device_name": "NCS-仿真", "point_code": "YC504", "alias": "Uab"}]','Uab',1);
 INSERT INTO point_mapping VALUES(59,'NCS-仿真','YC506','[{"device_name": "NCS-仿真", "point_code": "YC504", "alias": "Uab"}]','Uab',1);
 INSERT INTO point_mapping VALUES(60,'NCS-仿真','YC503','[{"device_name": "NCS-仿真", "point_code": "YC501", "alias": "P"}, {"device_name": "NCS-仿真", "point_code": "YC515", "alias": "PF"}]','P * sqrt(1 / (max(PF, 0.001) * max(PF, 0.001)) - 1)',1);

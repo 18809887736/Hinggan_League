@@ -644,6 +644,10 @@ class Device:
     async def start(self) -> bool:
         """启动设备"""
         try:
+            # 本地补丁11：协议已在运行时重复「启动」直接返回成功——服务端 handler 的 start 不幂等，
+            # 重复调用会二次监听（start.ps1 会对已自动开启的设备再调一次启动接口）
+            if self.protocol_handler is not None and self.protocol_handler.is_running:
+                return True
             if self.protocol_type not in (
                 ProtocolType.OpcUaClient,
                 ProtocolType.OpcUaServer,

@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# SQLite 数据库按二进制处理：不做换行转换、不做文本 diff（仿真器各包的 data/ems.db、DUT 实时库副本）
+*.db binary

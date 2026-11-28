@@ -25,7 +25,7 @@ function Post($path, $obj) {
 foreach ($dev in @('PLC-仿真', 'NCS-仿真', '主站-仿真')) {
     Post 'api/devices/start' @{ device_name = $dev } | Out-Null
 }
-Write-Host '[2/3] 三台设备已启动'
+Write-Host '[2/3] 设备已就绪（PLC-仿真、NCS-仿真 随程序自动开启，这里的启动调用是空操作；主站-仿真已启动）'
 
 # 主站客户端需先连上 DUT 才能开自动读取，最多重试 5 次
 for ($i = 1; $i -le 5; $i++) {

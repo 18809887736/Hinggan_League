@@ -190,7 +190,13 @@ ems-simulate-docker/*.tar.gz
 发布/**/*.tar
 
 # 对外统一交付物：组装产物不入库（zip 超 100MB 走拷贝分发）；文档/脚本/基线dump/工具入库
-发布/对外统一交付物/ems-sim-win-*/
+# 例外（2026-11-27 用户要求）：各交付包的仿真器数据库 data/ems.db 入库。
+# 包目录是按整目录忽略的，git 无法单独放行其中的文件，所以改成"忽略包内全部内容、再逐层放行到 ems.db"；
+# -wal / -shm / *.bak-* 备份文件仍然不入库。
+发布/对外统一交付物/ems-sim-win-*/**
+!发布/对外统一交付物/ems-sim-win-*/
+!发布/对外统一交付物/ems-sim-win-*/data/
+!发布/对外统一交付物/ems-sim-win-*/data/ems.db
 发布/对外统一交付物/*.zip
 发布/对外统一交付物/assets_base.db
 
